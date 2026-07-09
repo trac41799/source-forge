@@ -662,11 +662,13 @@ fn check_security(base: &Path, report: &mut VerificationReport) {
 }
 
 fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
-    let server_file = base.join("src").join("server.ts");
+    let is_nextjs = base.join("next.config.ts").exists() || base.join("next.config.js").exists();
+    let is_express = base.join("src").join("server.ts").exists();
     let pkg = base.join("package.json");
-    if !server_file.exists() && !pkg.exists() {
+
+    if !is_nextjs && !is_express && !pkg.exists() {
         report.add(BuildCheck {
-            name: "E2E server smoke test".into(),
+            name: "E2E runtime test".into(),
             status: CheckStatus::Skip("No server entry point found".into()),
             detail: String::new(),
         });
@@ -675,59 +677,78 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
 
     let port: u16 = 4199;
     let node_cmd = find_node_command();
+    let mut child: Option<Child> = None;
 
-    let has_tsx = base.join("node_modules").join("tsx").join("dist").join("cli.mjs").exists();
-    if !has_tsx {
-        report.add(BuildCheck {
-            name: "E2E server smoke test".into(),
-            status: CheckStatus::Fail("Cannot start server — tsx not installed. Run: npm install -D tsx".into()),
-            detail: String::new(),
-        });
-        return;
+    if is_nextjs {
+        let nm = base.join("node_modules").join(".bin").join("next");
+        let next_bin = if nm.exists() { nm } else { base.join("node_modules").join("next").join("dist").join("bin").join("next") };
+        if !next_bin.exists() {
+            report.add(BuildCheck {
+                name: "E2E runtime test".into(),
+                status: CheckStatus::Fail("next binary not found in node_modules".into()),
+                detail: String::new(),
+            });
+            return;
+        }
+        child = Command::new(&node_cmd)
+            .arg(&next_bin)
+            .arg("dev")
+            .arg("--port").arg(port.to_string())
+            .env("JWT_SECRET", "e2e-test-secret")
+            .env("DATABASE_URL", "postgresql://none:none@localhost:5432/none")
+            .env("NEXT_PUBLIC_SUPABASE_URL", "https://placeholder.supabase.co")
+            .env("NEXT_PUBLIC_SUPABASE_ANON_KEY", "placeholder")
+            .current_dir(base)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok();
+    } else if is_express {
+        let tsx = base.join("node_modules").join("tsx").join("dist").join("cli.mjs");
+        if tsx.exists() {
+            child = Command::new(&node_cmd)
+                .arg(&tsx).arg("src/server.ts")
+                .env("PORT", port.to_string())
+                .env("JWT_SECRET", "e2e-test-secret")
+                .env("JWT_REFRESH_SECRET", "e2e-test-refresh")
+                .env("DATABASE_URL", "postgresql://none:none@localhost:5432/none")
+                .env("NODE_ENV", "test")
+                .current_dir(base)
+                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().ok();
+        }
     }
 
-    let tsx_bin = base.join("node_modules").join("tsx").join("dist").join("cli.mjs");
-    let mut child = match Command::new(&node_cmd)
-        .arg(&tsx_bin)
-        .arg("src/server.ts")
-        .env("PORT", port.to_string())
-        .env("JWT_SECRET", "e2e-test-secret")
-        .env("JWT_REFRESH_SECRET", "e2e-test-refresh")
-        .env("DATABASE_URL", "postgresql://none:none@localhost:5432/none")
-        .env("NODE_ENV", "test")
-        .current_dir(base)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
-        Ok(c) => c,
-        Err(e) => {
+    let mut server = match child {
+        Some(c) => c,
+        None => {
             report.add(BuildCheck {
-                name: "E2E server smoke test".into(),
-                status: CheckStatus::Fail(format!("Cannot spawn server process: {e}")),
+                name: "E2E runtime test".into(),
+                status: CheckStatus::Fail("Cannot start dev server".into()),
                 detail: String::new(),
             });
             return;
         }
     };
 
-    // Wait for server to boot
+    // Wait for boot
     let mut booted = false;
-    for _ in 0..20 {
+    for _ in 0..40 { // Next.js takes longer to boot
         std::thread::sleep(Duration::from_millis(500));
-        if let Ok(status) = http_get(port, "/api/health") {
-            if status == 200 {
-                booted = true;
-                break;
-            }
+        if http_get(port, if is_nextjs { "/api/auth/register" } else { "/api/health" }) == Ok(405) || http_get(port, if is_nextjs { "/api/auth/login" } else { "/api/health" }) == Ok(405) {
+            continue; // 405 = server booting but route not ready yet
+        }
+        if http_get(port, if is_nextjs { "/" } else { "/api/health" }).is_ok() {
+            booted = true;
+            break;
         }
     }
 
     if !booted {
-        let _ = child.kill();
+        let _ = server.kill();
         report.add(BuildCheck {
-            name: "E2E server smoke test".into(),
-            status: CheckStatus::Fail("Server failed to boot within 10 seconds.".into()),
+            name: "E2E runtime test".into(),
+            status: CheckStatus::Fail("Server failed to boot within 20 seconds".into()),
             detail: String::new(),
         });
         return;
@@ -736,24 +757,74 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
     let mut passed = 0;
     let mut failed = 0;
 
-    if http_get(port, "/api/health") == Ok(200) { passed += 1; } else { failed += 1; }
-    if http_get(port, "/api/auth/me") == Ok(401) { passed += 1; } else { failed += 1; }
-    if http_post_json(port, "/api/auth/register", r#"{"email":"bad","password":"short","name":"x"}"#) == Ok(400) { passed += 1; } else { failed += 1; }
-    if http_get(port, "/api/bogus") == Ok(404) { passed += 1; } else { failed += 1; }
+    // Test 1: Health or root
+    if is_nextjs {
+        if http_get(port, "/").is_ok() { passed += 1; } else { failed += 1; }
+    } else {
+        if http_get(port, "/api/health") == Ok(200) { passed += 1; } else { failed += 1; }
+    }
 
-    let _ = child.kill();
+    // Test 2: Auth middleware (no cookie → 401)
+    if http_get(port, "/api/auth/me") == Ok(401) { passed += 1; } else { failed += 1; }
+
+    // Test 3: Validation (bad register → 400)
+    if http_post_json(port, "/api/auth/register", r#"{"email":"bad","password":"short","name":"x"}"#) == Ok(400) { passed += 1; } else { failed += 1; }
+
+    // Test 4: Register with valid data → 201 + extract Set-Cookie
+    let email = format!("e2e-{}@test.local", std::process::id());
+    let reg_body = format!(r#"{{"email":"{}","password":"Test1234!","name":"E2E"}}"#, email);
+    let reg_resp = http_post_json_full(port, "/api/auth/register", &reg_body);
+    let mut cookie: Option<String> = None;
+
+    if let Ok((status, headers, _body)) = &reg_resp {
+        if *status == 201 {
+            // Extract Set-Cookie header
+            for h in headers {
+                if h.to_lowercase().starts_with("set-cookie:") {
+                    if let Some(val) = h.splitn(2, ':').nth(1) {
+                        if let Some(c) = val.trim().split(';').next() {
+                            cookie = Some(c.to_string());
+                        }
+                    }
+                }
+            }
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+    } else {
+        failed += 1;
+    }
+
+    // Test 5: Me with cookie → 200 (verifies cookie auth flow works)
+    if let Some(ref c) = cookie {
+        if http_get_with_cookie(port, "/api/auth/me", c) == Ok(200) {
+            passed += 1;
+        } else {
+            failed += 1;
+        }
+    } else {
+        // Cookie not set — this IS a failure if register passed but no cookie
+        failed += 1;
+    }
+
+    // Test 6: 404 structured error
+    if http_get(port, "/api/bogus-nonexistent") == Ok(404) { passed += 1; } else { failed += 1; }
+
+    let _ = server.kill();
 
     if failed == 0 {
         report.add(BuildCheck {
-            name: "E2E server smoke test".into(),
+            name: "E2E runtime test".into(),
             status: CheckStatus::Pass,
-            detail: format!("Server booted on :{}, 4/4 HTTP tests passed (health, auth, validation, 404)", port),
+            detail: format!("Server booted, {}/6 HTTP tests passed (reg+cookie auth flow verified)", passed),
         });
     } else {
+        let cookie_note = if cookie.is_none() { " (Set-Cookie header missing — cookie auth broken!)" } else { "" };
         report.add(BuildCheck {
-            name: "E2E server smoke test".into(),
-            status: CheckStatus::Fail(format!("Server booted but {failed}/4 HTTP tests failed")),
-            detail: "Check API routes and middleware.".into(),
+            name: "E2E runtime test".into(),
+            status: CheckStatus::Fail(format!("{}/6 tests failed{cookie_note}. Full auth flow (register → cookie → me) must pass.", failed)),
+            detail: format!("{} tests passed, {} failed", passed, failed),
         });
     }
 }
@@ -787,14 +858,50 @@ fn http_get(port: u16, path: &str) -> Result<u16, String> {
 }
 
 fn http_post_json(port: u16, path: &str, body: &str) -> Result<u16, String> {
+    http_post_json_full(port, path, body).map(|(s, _, _)| s)
+}
+
+fn http_post_json_full(port: u16, path: &str, body: &str) -> Result<(u16, Vec<String>, String), String> {
     let mut stream = TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", port).parse().unwrap(),
-        Duration::from_secs(2),
+        Duration::from_secs(3),
     )
     .map_err(|e| e.to_string())?;
     let req = format!(
         "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         path, port, body.len(), body
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let resp = String::from_utf8_lossy(&buf);
+    let mut headers = Vec::new();
+    let mut status = 0u16;
+    let mut in_body = false;
+    let mut body_lines = Vec::new();
+    for line in resp.lines() {
+        if !in_body {
+            if line.is_empty() { in_body = true; continue; }
+            if let Some(code) = line.split_whitespace().nth(1) {
+                status = code.parse().unwrap_or(0);
+            }
+            headers.push(line.to_string());
+        } else {
+            body_lines.push(line.to_string());
+        }
+    }
+    Ok((status, headers, body_lines.join("\n")))
+}
+
+fn http_get_with_cookie(port: u16, path: &str, cookie: &str) -> Result<u16, String> {
+    let mut stream = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        Duration::from_secs(3),
+    )
+    .map_err(|e| e.to_string())?;
+    let req = format!(
+        "GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nCookie: {}\r\nConnection: close\r\n\r\n",
+        path, port, cookie
     );
     stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
     let mut buf = Vec::new();
