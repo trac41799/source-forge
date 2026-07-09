@@ -33,6 +33,8 @@ mod spec_parser;
 mod verification;
 mod wave_persistence;
 mod integration_tests;
+mod stack_registry;
+mod preferences;
 
 use commands::AppState;
 use log::info;
@@ -112,6 +114,12 @@ pub fn run() {
             commands::verify_project_cmd,
             commands::verify_and_finalize_wave_cmd,
             commands::generate_deploy_config_cmd,
+            commands::list_available_stacks_cmd,
+            commands::detect_installed_clis_cmd,
+            commands::recommend_stack_cmd,
+            commands::missing_clis_for_stack_cmd,
+            commands::get_preferences_cmd,
+            commands::set_preferences_cmd,
             commands::log_event,
             commands::log_event_with_payload,
             commands::get_events,

@@ -720,6 +720,55 @@ pub async fn generate_deploy_config_cmd(
     Ok(format!("Generated: {}", vercel_path.display()))
 }
 
+// ── Stack Registry Commands ─────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_available_stacks_cmd() -> Result<Vec<crate::stack_registry::StackPreset>, String> {
+    Ok(crate::stack_registry::StackPreset::all().to_vec())
+}
+
+#[tauri::command]
+pub async fn detect_installed_clis_cmd(
+) -> Result<std::collections::HashMap<String, crate::stack_registry::CliStatus>, String> {
+    Ok(crate::stack_registry::detect_installed_clis())
+}
+
+#[tauri::command]
+pub async fn recommend_stack_cmd() -> Result<crate::stack_registry::StackPreset, String> {
+    let status = crate::stack_registry::detect_installed_clis();
+    crate::stack_registry::recommend_stack(&status)
+        .cloned()
+        .ok_or_else(|| "No stack available".to_string())
+}
+
+#[tauri::command]
+pub async fn missing_clis_for_stack_cmd(
+    stack_id: String,
+) -> Result<Vec<String>, String> {
+    let status = crate::stack_registry::detect_installed_clis();
+    Ok(crate::stack_registry::missing_clis_for_stack(&stack_id, &status))
+}
+
+// ── User Preferences Commands ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_preferences_cmd(
+    state: State<'_, AppState>,
+) -> Result<crate::preferences::UserPreferences, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::preferences::get_preferences(&db)
+}
+
+#[tauri::command]
+pub async fn set_preferences_cmd(
+    state: State<'_, AppState>,
+    preferences: crate::preferences::UserPreferences,
+) -> Result<crate::preferences::UserPreferences, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::preferences::set_preferences(&db, &preferences)?;
+    crate::preferences::get_preferences(&db)
+}
+
 #[tauri::command]
 pub async fn create_correction_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, bug_desc: String, root_cause: String, fix_required: String, test_required: String, retry_number: i64) -> Result<orchestrator::CorrectionDoc, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;

@@ -37,6 +37,7 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         ("012", include_str!("../migrations/012_codebase_exploration.sql")),
         ("013", include_str!("../migrations/013_app_state_snapshot.sql")),
         ("014", include_str!("../migrations/014_bagua_semantics.sql")),
+        ("015", include_str!("../migrations/015_user_preferences.sql")),
     ];
 
     for (id, sql) in late {
