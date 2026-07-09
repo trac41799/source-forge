@@ -5,15 +5,19 @@
 // marking a wave as complete.
 //
 // Checks performed:
-//   Project: package.json, node_modules, git remote, README, .env
-//   Build:   dist/ exists, tsc passes, npm build passes
-//   Deploy:  vercel.json with /api exclusion, SPA routing
-//   Quality: ErrorBoundary, loading states, API client production config
+//   Project:  package.json, node_modules, git remote, README, .env
+//   Build:    dist/ exists, tsc passes, npm build passes
+//   Deploy:   vercel.json with /api exclusion, SPA routing
+//   Quality:  ErrorBoundary, loading states, API client production config
 //   Security: CORS origin, JWT not hardcoded, npm audit
+//   E2E:      Start server, HTTP health check, auth flow smoke test
 
 use serde::{Deserialize, Serialize};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CheckStatus {
@@ -113,6 +117,9 @@ pub fn verify_project(base: &Path) -> VerificationReport {
     check_api_client_production(base, &mut report);
     check_cors_production(base, &mut report);
     check_security(base, &mut report);
+
+    // ── 5. E2E runtime verification ─────────────────────────────
+    check_e2e_runtime(base, &mut report);
 
     report
 }
@@ -652,6 +659,153 @@ fn check_security(base: &Path, report: &mut VerificationReport) {
             detail: "No hardcoded secrets detected".into(),
         });
     }
+}
+
+fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
+    let server_file = base.join("src").join("server.ts");
+    let pkg = base.join("package.json");
+    if !server_file.exists() && !pkg.exists() {
+        report.add(BuildCheck {
+            name: "E2E server smoke test".into(),
+            status: CheckStatus::Skip("No server entry point found".into()),
+            detail: String::new(),
+        });
+        return;
+    }
+
+    let port: u16 = 4199;
+    let node_cmd = find_node_command();
+
+    let has_tsx = base.join("node_modules").join("tsx").join("dist").join("cli.mjs").exists();
+    if !has_tsx {
+        report.add(BuildCheck {
+            name: "E2E server smoke test".into(),
+            status: CheckStatus::Fail("Cannot start server — tsx not installed. Run: npm install -D tsx".into()),
+            detail: String::new(),
+        });
+        return;
+    }
+
+    let tsx_bin = base.join("node_modules").join("tsx").join("dist").join("cli.mjs");
+    let mut child = match Command::new(&node_cmd)
+        .arg(&tsx_bin)
+        .arg("src/server.ts")
+        .env("PORT", port.to_string())
+        .env("JWT_SECRET", "e2e-test-secret")
+        .env("JWT_REFRESH_SECRET", "e2e-test-refresh")
+        .env("DATABASE_URL", "postgresql://none:none@localhost:5432/none")
+        .env("NODE_ENV", "test")
+        .current_dir(base)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            report.add(BuildCheck {
+                name: "E2E server smoke test".into(),
+                status: CheckStatus::Fail(format!("Cannot spawn server process: {e}")),
+                detail: String::new(),
+            });
+            return;
+        }
+    };
+
+    // Wait for server to boot
+    let mut booted = false;
+    for _ in 0..20 {
+        std::thread::sleep(Duration::from_millis(500));
+        if let Ok(status) = http_get(port, "/api/health") {
+            if status == 200 {
+                booted = true;
+                break;
+            }
+        }
+    }
+
+    if !booted {
+        let _ = child.kill();
+        report.add(BuildCheck {
+            name: "E2E server smoke test".into(),
+            status: CheckStatus::Fail("Server failed to boot within 10 seconds.".into()),
+            detail: String::new(),
+        });
+        return;
+    }
+
+    let mut passed = 0;
+    let mut failed = 0;
+
+    if http_get(port, "/api/health") == Ok(200) { passed += 1; } else { failed += 1; }
+    if http_get(port, "/api/auth/me") == Ok(401) { passed += 1; } else { failed += 1; }
+    if http_post_json(port, "/api/auth/register", r#"{"email":"bad","password":"short","name":"x"}"#) == Ok(400) { passed += 1; } else { failed += 1; }
+    if http_get(port, "/api/bogus") == Ok(404) { passed += 1; } else { failed += 1; }
+
+    let _ = child.kill();
+
+    if failed == 0 {
+        report.add(BuildCheck {
+            name: "E2E server smoke test".into(),
+            status: CheckStatus::Pass,
+            detail: format!("Server booted on :{}, 4/4 HTTP tests passed (health, auth, validation, 404)", port),
+        });
+    } else {
+        report.add(BuildCheck {
+            name: "E2E server smoke test".into(),
+            status: CheckStatus::Fail(format!("Server booted but {failed}/4 HTTP tests failed")),
+            detail: "Check API routes and middleware.".into(),
+        });
+    }
+}
+
+fn find_node_command() -> String {
+    for cmd in &["node", "node.exe"] {
+        if Command::new(cmd).arg("--version").output().is_ok() {
+            return cmd.to_string();
+        }
+    }
+    "node".to_string()
+}
+
+fn http_get(port: u16, path: &str) -> Result<u16, String> {
+    let mut stream = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        Duration::from_secs(2),
+    )
+    .map_err(|e| e.to_string())?;
+    let req = format!("GET {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: close\r\n\r\n", path, port);
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let resp = String::from_utf8_lossy(&buf);
+    if let Some(line) = resp.lines().next() {
+        if let Some(code) = line.split_whitespace().nth(1) {
+            return code.parse::<u16>().map_err(|e| e.to_string());
+        }
+    }
+    Err("No status line".into())
+}
+
+fn http_post_json(port: u16, path: &str, body: &str) -> Result<u16, String> {
+    let mut stream = TcpStream::connect_timeout(
+        &format!("127.0.0.1:{}", port).parse().unwrap(),
+        Duration::from_secs(2),
+    )
+    .map_err(|e| e.to_string())?;
+    let req = format!(
+        "POST {} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        path, port, body.len(), body
+    );
+    stream.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).map_err(|e| e.to_string())?;
+    let resp = String::from_utf8_lossy(&buf);
+    if let Some(line) = resp.lines().next() {
+        if let Some(code) = line.split_whitespace().nth(1) {
+            return code.parse::<u16>().map_err(|e| e.to_string());
+        }
+    }
+    Err("No status line".into())
 }
 
 /// Generate a vercel.json with SPA rewrites that exclude /api paths.
