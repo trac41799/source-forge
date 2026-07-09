@@ -686,6 +686,40 @@ pub async fn seed_wave_from_spec_cmd(
     Ok(plan)
 }
 
+// ── Deployment Verification Phase (Wave 5) ───────────────────────────
+
+#[tauri::command]
+pub async fn verify_project_cmd(
+    project_path: String,
+) -> Result<crate::verification::VerificationReport, String> {
+    use std::path::Path;
+    Ok(crate::verification::verify_project(Path::new(&project_path)))
+}
+
+#[tauri::command]
+pub async fn verify_and_finalize_wave_cmd(
+    state: State<'_, AppState>,
+    report: wave_executor::WaveExecutionReport,
+    project_path: String,
+) -> Result<serde_json::Value, String> {
+    use std::path::Path;
+    let mut wave_report = wave_executor::finalize_wave(&state.db, report).await?;
+    let verify = crate::verification::verify_project(Path::new(&project_path));
+    Ok(serde_json::json!({
+        "wave": wave_report,
+        "verification": verify
+    }))
+}
+
+#[tauri::command]
+pub async fn generate_deploy_config_cmd(
+    project_path: String,
+) -> Result<String, String> {
+    use std::path::Path;
+    let vercel_path = crate::verification::generate_vercel_config(Path::new(&project_path))?;
+    Ok(format!("Generated: {}", vercel_path.display()))
+}
+
 #[tauri::command]
 pub async fn create_correction_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, bug_desc: String, root_cause: String, fix_required: String, test_required: String, retry_number: i64) -> Result<orchestrator::CorrectionDoc, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;

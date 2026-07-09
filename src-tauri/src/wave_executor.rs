@@ -159,7 +159,9 @@ pub async fn execute_wave_real(
     Ok(report)
 }
 
-/// Finalize a wave: check each agent's handoff file and update its status.
+/// Finalize a wave: check each agent's handoff file, optionally verify build output,
+/// and update agent statuses. If verify_path is provided, runs deployment verification
+/// and attaches the report to the wave report.
 pub async fn finalize_wave(
     db: &Mutex<Connection>,
     mut report: WaveExecutionReport,
@@ -167,7 +169,6 @@ pub async fn finalize_wave(
     let mut total = 0.0;
 
     for agent_exec in &mut report.agents {
-        // Look for HANDOFF_<agent_ref>.md in the worktree
         let handoff_path = std::path::Path::new(&agent_exec.worktree_path)
             .join(format!("HANDOFF_{}.md", agent_exec.agent_ref));
 
@@ -195,6 +196,21 @@ pub async fn finalize_wave(
     report.total_cost_usd = total;
     report.completed_at = Some(chrono::Utc::now().to_rfc3339());
     Ok(report)
+}
+
+/// Finalize a wave WITH deployment verification.
+/// After agents finish, runs project verification and includes results.
+pub async fn finalize_wave_with_verify(
+    db: &Mutex<Connection>,
+    report: WaveExecutionReport,
+    project_path: &str,
+) -> Result<serde_json::Value, String> {
+    let wave_report = finalize_wave(db, report).await?;
+    let verify_report = crate::verification::verify_project(std::path::Path::new(project_path));
+    Ok(serde_json::json!({
+        "wave": wave_report,
+        "verification": verify_report
+    }))
 }
 
 /// Execute a wave using the adapter registry (Feature 1 integration)

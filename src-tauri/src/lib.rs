@@ -30,6 +30,7 @@ mod pty_guards;
 mod handoff_parser;
 mod wave_executor;
 mod spec_parser;
+mod verification;
 mod wave_persistence;
 mod integration_tests;
 
@@ -108,6 +109,9 @@ pub fn run() {
             commands::execute_wave_cmd,
             commands::finalize_wave_cmd,
             commands::seed_wave_from_spec_cmd,
+            commands::verify_project_cmd,
+            commands::verify_and_finalize_wave_cmd,
+            commands::generate_deploy_config_cmd,
             commands::log_event,
             commands::log_event_with_payload,
             commands::get_events,

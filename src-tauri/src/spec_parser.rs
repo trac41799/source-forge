@@ -19,6 +19,10 @@ pub struct SpecTask {
     pub files_modify: Vec<String>,
     pub wave: i64,            // 1 for security, 2 for UX, 3 for docs
     pub depends_on: Option<String>,
+    /// If true, this step includes a deployment verification check
+    /// after all agents in the wave complete. Runs build check + SPA
+    /// routing check + smoke tests.
+    pub verify_deploy: bool,
 }
 
 /// Parse the GAP_CLOSURE_PLAN.md into structured tasks.
@@ -126,6 +130,8 @@ fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Optio
         None
     };
 
+    let verify_deploy = phase == "5" || title.to_lowercase().contains("deploy") || title.to_lowercase().contains("verify");
+
     Some(SpecTask {
         phase: phase.to_string(),
         step: step_id.to_string(),
@@ -135,6 +141,7 @@ fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Optio
         files_modify,
         wave,
         depends_on,
+        verify_deploy,
     })
 }
 
