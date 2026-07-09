@@ -769,6 +769,56 @@ pub async fn set_preferences_cmd(
     crate::preferences::get_preferences(&db)
 }
 
+// ── Infrastructure Provisioner Commands ────────────────────────────
+
+#[tauri::command]
+pub async fn provision_stack_cmd(
+    stack_id: String,
+) -> Result<crate::provisioner::ProvisionReport, String> {
+    Ok(crate::provisioner::provision(&stack_id))
+}
+
+#[tauri::command]
+pub async fn check_cli_cmd(
+    tool: String,
+) -> Result<crate::stack_registry::CliStatus, String> {
+    Ok(crate::provisioner::check_cli(&tool))
+}
+
+#[tauri::command]
+pub async fn install_cli_cmd(
+    tool: String,
+) -> Result<bool, String> {
+    crate::provisioner::install_cli(&tool).map(|_| true)
+}
+
+// ── Architecture Engine Commands ──────────────────────────────────
+
+#[tauri::command]
+pub async fn scaffold_project_cmd(
+    stack_id: String,
+    project_path: String,
+    project_name: String,
+) -> Result<crate::arch_engine::ScaffoldReport, String> {
+    crate::arch_engine::scaffold_project(&stack_id, &project_path, &project_name)
+}
+
+// ── Delegation Commands ───────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_delegation_report_cmd(
+    tasks: Vec<serde_json::Value>,
+) -> Result<crate::delegation::DelegationReport, String> {
+    let mut report = crate::delegation::DelegationReport::new();
+    for t in tasks {
+        let step = t["step"].as_str().unwrap_or("");
+        let instructions = t["instructions"].as_str().unwrap_or("");
+        let reason = t["reason"].as_str().unwrap_or("");
+        report.add_task(step, instructions, reason);
+    }
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn create_correction_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, bug_desc: String, root_cause: String, fix_required: String, test_required: String, retry_number: i64) -> Result<orchestrator::CorrectionDoc, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;

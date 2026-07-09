@@ -18,6 +18,8 @@ import {
   Brain,
   Layers,
   Sparkles,
+  Cpu,
+  Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import PositioningPanel from "@/components/PositioningPanel";
@@ -284,6 +286,50 @@ export default function SettingsPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </Card>
+
+        {/* Stack Preferences */}
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Cpu className="size-5" />
+            <h2 className="text-lg font-semibold">Default Stack</h2>
+          </div>
+          <Separator />
+          <p className="text-sm text-muted-foreground">
+            Choose your preferred technology stack for new projects.
+            SourceForge will provision infrastructure and scaffold projects accordingly.
+          </p>
+          <div className="grid grid-cols-1 gap-3">
+            {[
+              { id: "nextjs-supabase-vercel", name: "Next.js + Supabase + Vercel", desc: "Full-stack with API routes, PostgreSQL, edge deployment", def: true },
+              { id: "nextjs-supabase-fastapi", name: "Next.js + Supabase + FastAPI", desc: "Next.js frontend, Python FastAPI backend, PostgreSQL", def: false },
+              { id: "express-react-supabase", name: "Express + React + Supabase", desc: "Express API, React Vite frontend, PostgreSQL", def: false },
+              { id: "nextjs-prisma-vercel", name: "Next.js + Prisma + Vercel Postgres", desc: "Next.js with Prisma ORM, Vercel managed Postgres", def: false },
+            ].map((stack) => (
+              <button
+                key={stack.id}
+                className={cn(
+                  "flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:border-primary/50",
+                  stack.def ? "border-primary bg-primary/5" : "border-border"
+                )}
+                onClick={() => store.updateDefaults?.({ defaultStack: stack.id })}
+                title={stack.def ? "Default" : ""}
+              >
+                <div className={cn("mt-0.5 size-4 rounded-full border-2 flex-shrink-0", stack.def ? "border-primary bg-primary" : "border-muted-foreground/30")} />
+                <div>
+                  <div className="text-sm font-medium">{stack.name}</div>
+                  <div className="text-xs text-muted-foreground">{stack.desc}</div>
+                </div>
+                {stack.def && <span className="ml-auto text-[10px] text-primary font-medium">DEFAULT</span>}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-2 pt-2">
+            <Terminal className="size-4 text-muted-foreground" />
+            <span className="text-xs text-muted-foreground">
+              CLI tools: Node.js, npm, Vercel CLI required. Supabase MCP auto-detected.
+            </span>
           </div>
         </Card>
 

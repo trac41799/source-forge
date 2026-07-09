@@ -1,0 +1,163 @@
+// src-tauri/src/arch_engine.rs
+//
+// Architecture Decision Engine: generates project scaffold based on
+// the chosen stack preset. Uses embedded templates for each stack.
+
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+
+use crate::stack_registry::StackPreset;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScaffoldReport {
+    pub stack_id: String,
+    pub stack_name: String,
+    pub files_created: Vec<String>,
+    pub next_steps: Vec<String>,
+}
+
+pub fn scaffold_project(
+    stack_id: &str,
+    project_path: &str,
+    project_name: &str,
+) -> Result<ScaffoldReport, String> {
+    let stack = StackPreset::get_by_id(stack_id)
+        .ok_or_else(|| format!("Unknown stack: {}", stack_id))?;
+
+    let base = Path::new(project_path);
+    std::fs::create_dir_all(base).map_err(|e| format!("Cannot create project dir: {e}"))?;
+
+    let mut report = ScaffoldReport {
+        stack_id: stack.id.clone(),
+        stack_name: stack.name.clone(),
+        files_created: Vec::new(),
+        next_steps: Vec::new(),
+    };
+
+    match stack.id.as_str() {
+        "nextjs-supabase-vercel" | "nextjs-prisma-vercel" => {
+            scaffold_nextjs(base, project_name, stack, &mut report)?;
+        }
+        "express-react-supabase" => {
+            scaffold_express_react(base, project_name, &mut report)?;
+        }
+        "nextjs-supabase-fastapi" => {
+            scaffold_nextjs(base, project_name, stack, &mut report)?;
+            scaffold_fastapi_backend(base, &mut report)?;
+        }
+        _ => return Err(format!("No scaffold for stack: {}", stack.id)),
+    }
+
+    report.next_steps.push("1. Run: npm install".into());
+    report.next_steps.push("2. Configure .env with DATABASE_URL".into());
+    report.next_steps.push("3. Run: npm run dev".into());
+
+    Ok(report)
+}
+
+fn w(base: &Path, rel: &str, content: &str, r: &mut ScaffoldReport) -> Result<(), String> {
+    let path = base.join(rel);
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("mkdir: {e}"))?;
+    }
+    if !path.exists() {
+        std::fs::write(&path, content).map_err(|e| format!("write {}: {e}", rel))?;
+        r.files_created.push(rel.to_string());
+    }
+    Ok(())
+}
+
+fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut ScaffoldReport) -> Result<(), String> {
+    let pkg = serde_json::json!({
+        "name": name, "version": "0.1.0", "private": true,
+        "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint" },
+        "dependencies": { "next": "^14.2.0", "react": "^18.3.0", "react-dom": "^18.3.0", "@prisma/client": "^5.15.0", "@supabase/supabase-js": "^2.43.0", "zod": "^3.23.0" },
+        "devDependencies": { "typescript": "^5.5.0", "@types/node": "^20.14.0", "@types/react": "^18.3.0", "@types/react-dom": "^18.3.0", "prisma": "^5.15.0", "tailwindcss": "^3.4.0", "postcss": "^8.4.0", "autoprefixer": "^10.4.0" }
+    });
+    w(base, "package.json", &serde_json::to_string_pretty(&pkg).unwrap(), r)?;
+    w(base, "next.config.js", "/** @type {import('next').NextConfig} */\nconst nextConfig = {};\nmodule.exports = nextConfig;\n", r)?;
+    w(base, "tsconfig.json", "{\"compilerOptions\":{\"target\":\"ES2017\",\"lib\":[\"dom\",\"dom.iterable\",\"esnext\"],\"allowJs\":true,\"skipLibCheck\":true,\"strict\":true,\"noEmit\":true,\"esModuleInterop\":true,\"module\":\"esnext\",\"moduleResolution\":\"bundler\",\"resolveJsonModule\":true,\"isolatedModules\":true,\"jsx\":\"preserve\",\"incremental\":true,\"plugins\":[{\"name\":\"next\"}],\"paths\":{\"@/*\":[\"./*\"]}},\"include\":[\"next-env.d.ts\",\"**/*.ts\",\"**/*.tsx\",\".next/types/**/*.ts\"],\"exclude\":[\"node_modules\"]}", r)?;
+    w(base, "tailwind.config.ts", "import type { Config } from 'tailwindcss';\nconst config: Config = { content: ['./app/**/*.{js,ts,jsx,tsx,mdx}'], theme: { extend: {} }, plugins: [] };\nexport default config;\n", r)?;
+    w(base, "postcss.config.js", "module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n", r)?;
+
+    let prov = if stack.id.contains("supabase") { "postgresql" } else { "postgresql" };
+    w(base, "prisma/schema.prisma", &format!("generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider = \"{prov}\"\n  url      = env(\"DATABASE_URL\")\n}}\n"), r)?;
+
+    w(base, "app/layout.tsx", &format!("import type {{ Metadata }} from 'next';\nimport './globals.css';\nexport const metadata: Metadata = {{ title: '{name}' }};\nexport default function RootLayout({{ children }}: {{ children: React.ReactNode }}) {{\n  return (<html lang=\"en\"><body>{{children}}</body></html>);\n}}\n"), r)?;
+    w(base, "app/globals.css", "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n", r)?;
+    w(base, "app/page.tsx", &format!("export default function Home() {{\n  return (<main className=\"flex min-h-screen items-center justify-center\"><h1 className=\"text-4xl font-bold\">Welcome to {name}</h1></main>);\n}}\n"), r)?;
+    w(base, "app/api/health/route.ts", "import {{ NextResponse }} from 'next/server';\nexport async function GET() {{\n  return NextResponse.json({{ status: 'ok', timestamp: new Date().toISOString() }});\n}}\n", r)?;
+    w(base, "lib/prisma.ts", "import {{ PrismaClient }} from '@prisma/client';\nconst g = globalThis as unknown as {{ prisma: PrismaClient }};\nexport const prisma = g.prisma || new PrismaClient();\nif (process.env.NODE_ENV !== 'production') g.prisma = prisma;\n", r)?;
+    w(base, "lib/supabase.ts", "import {{ createClient }} from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
+    w(base, ".env.example", "# Database\nDATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n", r)?;
+    w(base, ".gitignore", "node_modules/\n.next/\ndist/\n.env\n.env.local\n*.db\n", r)?;
+    r.next_steps.push("4. Run: npx prisma generate".into());
+    r.next_steps.push("5. Set DATABASE_URL + Supabase keys in .env".into());
+    Ok(())
+}
+
+fn scaffold_express_react(base: &Path, name: &str, r: &mut ScaffoldReport) -> Result<(), String> {
+    let pkg = serde_json::json!({
+        "name": name, "version": "0.1.0", "private": true,
+        "scripts": { "dev": "vite", "build": "tsc && vite build", "dev:server": "tsx src/server.ts", "start": "node dist/server.js" },
+        "dependencies": { "express": "^4.19.0", "cors": "^2.8.5", "@prisma/client": "^5.15.0", "@supabase/supabase-js": "^2.43.0", "zod": "^3.23.0" },
+        "devDependencies": { "typescript": "^5.5.0", "vite": "^5.3.0", "@vitejs/plugin-react": "^4.3.0", "tsx": "^4.15.0", "prisma": "^5.15.0", "@types/express": "^4.17.0", "@types/cors": "^2.8.0" }
+    });
+    w(base, "package.json", &serde_json::to_string_pretty(&pkg).unwrap(), r)?;
+    w(base, ".gitignore", "node_modules/\ndist/\n.env\n", r)?;
+    w(base, ".env.example", "DATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\nPORT=3000\n", r)?;
+    Ok(())
+}
+
+fn scaffold_fastapi_backend(base: &Path, r: &mut ScaffoldReport) -> Result<(), String> {
+    let be = base.join("backend");
+    std::fs::create_dir_all(&be).map_err(|e| format!("mkdir backend: {e}"))?;
+    w(&be, "requirements.txt", "fastapi==0.111.0\nuvicorn==0.30.0\nsupabase==2.5.0\n", r)?;
+    w(&be, "main.py", "from fastapi import FastAPI\nfrom fastapi.middleware.cors import CORSMiddleware\n\napp = FastAPI()\napp.add_middleware(CORSMiddleware, allow_origins=[\"*\"], allow_methods=[\"*\"], allow_headers=[\"*\"])\n\n@app.get(\"/api/health\")\nasync def health():\n    return {\"status\": \"ok\"}\n", r)?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn tp() -> (TempDir, String) {
+        let d = TempDir::new().unwrap();
+        let p = d.path().to_string_lossy().to_string();
+        (d, p)
+    }
+
+    #[test]
+    fn test_nextjs_creates_core_files() {
+        let (_d, p) = tp();
+        let r = scaffold_project("nextjs-supabase-vercel", &p, "na").unwrap();
+        assert!(r.files_created.len() >= 8);
+        assert!(Path::new(&p).join("package.json").exists());
+        assert!(Path::new(&p).join("app/page.tsx").exists());
+        assert!(Path::new(&p).join("app/api/health/route.ts").exists());
+        assert!(Path::new(&p).join("prisma/schema.prisma").exists());
+    }
+
+    #[test]
+    fn test_nextjs_prisma_uses_postgresql() {
+        let (_d, p) = tp();
+        scaffold_project("nextjs-supabase-vercel", &p, "na").unwrap();
+        let s = std::fs::read_to_string(Path::new(&p).join("prisma/schema.prisma")).unwrap();
+        assert!(s.contains("postgresql"));
+    }
+
+    #[test]
+    fn test_express_creates_package_json() {
+        let (_d, p) = tp();
+        let r = scaffold_project("express-react-supabase", &p, "na").unwrap();
+        assert!(Path::new(&p).join("package.json").exists());
+        assert!(r.files_created.len() >= 2);
+    }
+
+    #[test]
+    fn test_invalid_stack_errors() {
+        let (_d, p) = tp();
+        assert!(scaffold_project("nope", &p, "na").is_err());
+    }
+}

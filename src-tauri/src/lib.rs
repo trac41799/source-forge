@@ -35,6 +35,9 @@ mod wave_persistence;
 mod integration_tests;
 mod stack_registry;
 mod preferences;
+mod provisioner;
+mod arch_engine;
+mod delegation;
 
 use commands::AppState;
 use log::info;
@@ -120,6 +123,11 @@ pub fn run() {
             commands::missing_clis_for_stack_cmd,
             commands::get_preferences_cmd,
             commands::set_preferences_cmd,
+            commands::provision_stack_cmd,
+            commands::check_cli_cmd,
+            commands::install_cli_cmd,
+            commands::scaffold_project_cmd,
+            commands::create_delegation_report_cmd,
             commands::log_event,
             commands::log_event_with_payload,
             commands::get_events,
