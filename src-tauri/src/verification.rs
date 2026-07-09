@@ -105,6 +105,7 @@ pub fn verify_project(base: &Path) -> VerificationReport {
 
     // ── 3. Deployment config ─────────────────────────────────────
     check_spa_config(base, &mut report);
+    check_docker_vercel_conflict(base, &mut report);
 
     // ── 4. Code quality ──────────────────────────────────────────
     check_error_boundary(base, &mut report);
@@ -454,6 +455,34 @@ fn check_spa_config(base: &Path, report: &mut VerificationReport) {
             }
             None => {}
         }
+    }
+}
+
+fn check_docker_vercel_conflict(base: &Path, report: &mut VerificationReport) {
+    let has_dockerfile = base.join("Dockerfile").exists();
+    let has_vercel = base.join("vercel.json").exists() || base.join(".vercel").is_dir();
+    let has_vercelignore = base.join(".vercelignore").exists();
+
+    if has_dockerfile && has_vercel && !has_vercelignore {
+        report.add(BuildCheck {
+            name: "Docker+Vercel no conflict".into(),
+            status: CheckStatus::Fail(
+                "Dockerfile present with Vercel config but no .vercelignore — Docker may override Vite framework detection, breaking SPA routing. Add .vercelignore to exclude Docker files.".into(),
+            ),
+            detail: "Create .vercelignore containing: Dockerfile\ndocker-compose.yml\n.dockerignore".into(),
+        });
+    } else if has_dockerfile && has_vercel && has_vercelignore {
+        report.add(BuildCheck {
+            name: "Docker+Vercel no conflict".into(),
+            status: CheckStatus::Pass,
+            detail: ".vercelignore present — Docker files excluded from Vercel deploy".into(),
+        });
+    } else {
+        report.add(BuildCheck {
+            name: "Docker+Vercel no conflict".into(),
+            status: CheckStatus::Skip("No Docker+Vercel conflict risk".into()),
+            detail: String::new(),
+        });
     }
 }
 
