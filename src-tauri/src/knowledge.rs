@@ -521,16 +521,15 @@ pub fn get_knowledge_stats(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    let mut stmt3 = db
-        .prepare(&format!(
+    let query = if where_clause.is_empty() {
+        "SELECT stack_tags, COUNT(*) as cnt FROM knowledge_items WHERE stack_tags IS NOT NULL GROUP BY stack_tags".to_string()
+    } else {
+        format!(
             "SELECT stack_tags, COUNT(*) as cnt FROM knowledge_items {} AND stack_tags IS NOT NULL GROUP BY stack_tags",
-            if where_clause.is_empty() {
-                "WHERE".to_string()
-            } else {
-                format!("{} AND", where_clause)
-            }
-        ))
-        .map_err(|e| e.to_string())?;
+            where_clause
+        )
+    };
+    let mut stmt3 = db.prepare(&query).map_err(|e| e.to_string())?;
 
     let by_stack: Vec<serde_json::Value> = stmt3
         .query_map([], |row| {
