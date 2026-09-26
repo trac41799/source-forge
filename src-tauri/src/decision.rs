@@ -788,6 +788,31 @@ pub fn choose_agent(
     )
 }
 
+/// M5 (spec R52): probe the backend with an empty state and a single `noul`,
+/// carrying no real data. Returns "healthy" | "degraded" | "offline".
+pub fn health_probe(
+    cfg: &DecisionConfig,
+    transport: &dyn DecisionTransport,
+    api_key: Option<&str>,
+) -> &'static str {
+    let questions = serde_json::json!({
+        "ok": { "type": "noul", "instructions": "Is this decision endpoint reachable?" }
+    });
+    match decision_request(
+        cfg,
+        transport,
+        api_key,
+        &serde_json::json!(""),
+        &questions,
+        0,
+        None,
+    ) {
+        Ok(_) => "healthy",
+        Err(DecisionError::Validation(_)) | Err(DecisionError::Malformed(_)) => "degraded",
+        Err(_) => "offline",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1222,5 +1247,22 @@ mod tests {
         assert!(criteria_from(KG_RELATION_TYPES).contains_key("contradicts"));
         assert!(criteria_from(OUTCOMES).contains_key("stalled"));
         assert!(criteria_from(COMPLEXITIES).contains_key("medium"));
+    }
+
+    #[test]
+    fn health_probe_reports_state() {
+        use std::sync::atomic::AtomicU32;
+        let cfg = DecisionConfig::default();
+
+        let ok = serde_json::json!({
+            "model": "m",
+            "answers": { "ok": { "type": "noul", "noul": 0.9 } },
+            "usage": { "input_tokens": 1, "cost": 0.0 }
+        });
+        let t_ok = MockTransport { calls: AtomicU32::new(0), fail: false, payload: ok };
+        assert_eq!(health_probe(&cfg, &t_ok, None), "healthy");
+
+        let t_bad = MockTransport { calls: AtomicU32::new(0), fail: true, payload: serde_json::json!({}) };
+        assert_eq!(health_probe(&cfg, &t_bad, None), "offline");
     }
 }

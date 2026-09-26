@@ -1026,6 +1026,9 @@ fn detect_and_record_contradictions(
     existing: &[KnowledgeItem],
 ) -> Result<usize, String> {
     let mut recorded = 0usize;
+    let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
+    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
     let antipattern_indicators = ["avoid", "don't", "do not", "never", "bug", "wrong", "bad"];
 
     for new_item in new_items {
@@ -1048,7 +1051,23 @@ fn detect_and_record_contradictions(
             if ex.r#type == "pattern" || ex.r#type == "convention" {
                 let ex_text =
                     format!("{} {}", ex.title, ex.content).to_lowercase();
-                if jaccard_similarity(&new_text, &ex_text) >= 0.5 {
+                // M4 (spec R40): decide "contradicts" via noul; Jaccard is the fallback.
+                let is_contradiction = match crate::decision::judge(
+                    &dec_cfg,
+                    &dec_transport,
+                    dec_key.as_deref(),
+                    &serde_json::json!({
+                        "a": format!("{} {}", new_item.title, new_item.content),
+                        "b": format!("{} {}", ex.title, ex.content),
+                    }),
+                    "Do `a` and `b` contradict each other?",
+                    "contradicts",
+                    Some(db),
+                ) {
+                    Ok(Some(p)) => p >= dec_cfg.review_threshold,
+                    _ => jaccard_similarity(&new_text, &ex_text) >= 0.5,
+                };
+                if is_contradiction {
                     let now = chrono::Utc::now().to_rfc3339();
                     let res = db.execute(
                         "INSERT OR IGNORE INTO knowledge_relations (from_id, to_id, relation_type, created_at, trigram_tag, hexagram_tag, wuxing_cycle, bagua_confidence, relation_multivector) VALUES (?1, ?2, 'contradicts', ?3, NULL, NULL, NULL, NULL, NULL)",
