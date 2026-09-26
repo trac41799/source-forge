@@ -280,6 +280,12 @@ pub fn compound_knowledge(
     db: &Connection,
     project_id: Option<&str>,
 ) -> Result<Vec<KnowledgeItem>, String> {
+    // M4 (spec R41): decision-derived same-insight confidence when available.
+    let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
+    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
+    let dec_ready = dec_key.is_some() || dec_cfg.backend == "local";
+
     let where_clause = if let Some(pid) = project_id {
         format!("WHERE project_id = '{}'", pid)
     } else {
@@ -338,7 +344,7 @@ pub fn compound_knowledge(
             break;
         }
 
-        let new_confidence = if total_confirmations > 0 {
+        let mut new_confidence = if total_confirmations > 0 {
             let base = weighted_confidence / total_confirmations as f64;
             let recency = Utc::now()
                 .signed_duration_since(
@@ -353,6 +359,21 @@ pub fn compound_knowledge(
         } else {
             current.confidence
         };
+
+        // M4 (spec R41): blend decision-derived same-insight confidence.
+        if j > i + 1 && dec_ready {
+            if let Ok(Some(p)) = crate::decision::judge(
+                &dec_cfg,
+                &dec_transport,
+                dec_key.as_deref(),
+                &serde_json::json!({ "a": current.content, "b": combined_content }),
+                "Do these knowledge items express the same insight?",
+                "same",
+                Some(db),
+            ) {
+                new_confidence = (new_confidence * 0.5 + p * 0.5).min(1.0);
+            }
+        }
 
         let now = Utc::now().to_rfc3339();
         if j > i + 1 {
