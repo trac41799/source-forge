@@ -3,6 +3,7 @@ import { Route, Routes, Navigate } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { RecoveryBanner } from "@/components/RecoveryBanner";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PlaceholderPage } from "@/pages/placeholder";
 import Runner from "@/pages/Runner";
 import Integrations from "@/pages/Integrations";
@@ -68,7 +69,8 @@ function App() {
             />
           )}
           <main className="flex-1 overflow-auto">
-            <Routes>
+            <ErrorBoundary>
+              <Routes>
               <Route path="/" element={<Navigate to="/runner" replace />} />
               <Route path="/runner" element={<Runner />} />
               <Route path="/route" element={<RoutePage />} />
@@ -90,6 +92,7 @@ function App() {
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<PlaceholderPage />} />
             </Routes>
+            </ErrorBoundary>
           </main>
         </div>
       </div>
