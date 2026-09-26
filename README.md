@@ -17,7 +17,7 @@
   <a href="https://react.dev"><img src="https://img.shields.io/badge/frontend-React_19-61dafb?style=flat-square" alt="React"></a>
   <img src="https://img.shields.io/badge/platform-Windows_%7C_macOS_%7C_Linux-eee?style=flat-square" alt="Platforms">
   <br>
-  <a href="https://github.com/edge8/agent-control-center/actions"><img src="https://img.shields.io/badge/build-passing-brightgreen?style=flat-square" alt="Build"></a>
+  <a href="https://github.com/edge8/agent-control-center/actions/workflows/ci.yml"><img src="https://github.com/edge8/agent-control-center/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/agents-9_supported-2dd4ff?style=flat-square" alt="9 Agents">
   <img src="https://img.shields.io/badge/stack-Rust_%7C_React_%7C_SQLite-ff6b6b?style=flat-square" alt="Stack">
 </p>

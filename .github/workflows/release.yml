@@ -10,7 +10,22 @@ permissions:
   contents: write
 
 jobs:
+  preflight:
+    name: Preflight (frontend gates)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:src
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+
   build:
+    needs: preflight
     strategy:
       fail-fast: false
       matrix:
