@@ -203,12 +203,12 @@ build_app_cmd(project_id, spec_path, project_path, options) -> BuildRunId
 
 ---
 
-## 6. Open questions (block Wave C)
+## 6. Open questions (RESOLVED 2026-09-26 — decisions below are binding for Wave C)
 
-1. **Deploy target v1:** Vercel CLI only, or also emit a generic Dockerfile path? (Recommended: Vercel only; Dockerfile is a delegation task.)
-2. **Supabase provisioning:** require a connected Supabase MCP session (current status quo) or add direct Management API via stored PAT? (Recommended: MCP first, PAT later.)
-3. **Compounder trigger:** auto-after-verify (this spec) or purely manual? (Recommended: auto, manual override available.)
-4. **Real-CLI E2E in CI:** allowed to spend money/use a provider key in CI (optional job), or manual-only release gate? (Recommended: manual-only for v1.)
+1. **Deploy target v1:** **Vercel + Dockerfile artifact** — run `vercel --prod --yes` for Vercel-target stacks AND generate a generic `Dockerfile` artifact for non-Vercel hosts (not executed in v1).
+2. **Supabase provisioning:** **Connected Supabase MCP first** — the pipeline detects an MCP session and delegates `apply_migration`; otherwise it pauses the run as `awaiting_user` (no new credentials stored).
+3. **Compounder trigger:** **Auto after each verified wave + manual** — `tokio::spawn` after finalize+verify using the split API; failures never block the wave; manual `run_compounder_cmd` stays available.
+4. **Real-CLI E2E in CI:** **Optional CI job with provider key** — a non-blocking job runs one real agent using a repository secret; the deterministic stub-CLI E2E stays required.
 
 ---
 

@@ -16,6 +16,7 @@ import CostAggregation from "@/pages/CostAggregation";
 import Knowledge from "@/pages/Knowledge";
 import Scheduler from "@/pages/Scheduler";
 import Settings from "@/pages/Settings";
+import BuildApp from "@/pages/BuildApp";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppStateSnapshot } from "@/lib/types";
 
@@ -72,6 +73,7 @@ function App() {
               <Route path="/runner" element={<Runner />} />
               <Route path="/route" element={<RoutePage />} />
               <Route path="/orchestrate" element={<Orchestrate />} />
+              <Route path="/build" element={<BuildApp />} />
               <Route path="/orchestrate/handoffs" element={<Orchestrate />} />
               <Route path="/orchestrate/messages" element={<Orchestrate />} />
               <Route path="/handoffs" element={<Navigate to="/orchestrate/handoffs" replace />} />

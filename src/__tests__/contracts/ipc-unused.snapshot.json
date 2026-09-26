@@ -1,4 +1,5 @@
 [
+  "cancel_build_app_cmd",
   "check_cli_cmd",
   "check_skillbridge",
   "claim_file_cmd",
@@ -12,6 +13,7 @@
   "generate_deploy_config_cmd",
   "generate_orchestrator_guideline_cmd",
   "get_agent_output",
+  "get_build_app_status_cmd",
   "get_project_locks_cmd",
   "get_subagent_patterns_cmd",
   "install_cli_cmd",
@@ -30,6 +32,7 @@
   "record_subagent_token_usage_cmd",
   "release_all_for_thread_cmd",
   "release_file_cmd",
+  "resume_build_app_cmd",
   "scaffold_project_cmd",
   "seed_wave_from_spec_cmd",
   "set_project_path",

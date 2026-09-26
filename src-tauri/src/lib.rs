@@ -12,6 +12,10 @@ pub mod intelligence;
 pub mod knowledge;
 mod knowledge_commands;
 mod compounder_llm;
+mod pipeline_store;
+mod deployer;
+mod pipeline;
+mod pipeline_commands;
 pub mod orchestrator;
 mod playbook;
 mod pty;
@@ -237,6 +241,10 @@ pub fn run() {
             commands::get_compounder_status_cmd,
             knowledge_commands::run_compounder_cmd,
             knowledge_commands::get_preflight_warnings_cmd,
+            pipeline_commands::build_app_cmd,
+            pipeline_commands::resume_build_app_cmd,
+            pipeline_commands::cancel_build_app_cmd,
+            pipeline_commands::get_build_app_status_cmd,
             // Knowledge Graph Commands
             commands::kg_local_search_cmd,
             commands::kg_global_search_cmd,

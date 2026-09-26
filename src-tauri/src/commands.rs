@@ -33,7 +33,7 @@ use crate::memory;
 
 pub struct AppState {
     pub pty_manager: Arc<PtyManager>,
-    pub db: Mutex<Connection>,
+    pub db: Arc<Mutex<Connection>>,
     pub current_project_path: Mutex<Option<String>>,
     pub memory_circuit_breaker: Mutex<memory::CircuitBreaker>,
     pub memory_anti_thrashing: Mutex<HashMap<String, (i64, bool)>>,
@@ -49,7 +49,7 @@ impl AppState {
     pub fn new(db: Connection) -> Self {
         Self {
             pty_manager: Arc::new(PtyManager::new()),
-            db: Mutex::new(db),
+            db: Arc::new(Mutex::new(db)),
             current_project_path: Mutex::new(None),
             memory_circuit_breaker: Mutex::new(memory::CircuitBreaker::new()),
             memory_anti_thrashing: Mutex::new(HashMap::new()),

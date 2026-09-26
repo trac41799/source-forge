@@ -29,6 +29,12 @@ export const IPC = {
   // Costs
   getCostSummary: "get_cost_summary_cmd",
 
+  // Build pipeline
+  buildApp: "build_app_cmd",
+  resumeBuildApp: "resume_build_app_cmd",
+  cancelBuildApp: "cancel_build_app_cmd",
+  getBuildAppStatus: "get_build_app_status_cmd",
+
   // Backward channel (chat platforms + daemon)
   getChatPlatformConfigs: "get_chat_platform_configs_cmd",
   saveChatPlatformConfig: "save_chat_platform_config_cmd",

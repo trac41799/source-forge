@@ -75,3 +75,29 @@ jobs:
       - name: Run IPC contract test (if present)
         if: ${{ hashFiles('src/__tests__/contracts/ipc-contract.test.ts') != '' }}
         run: npx vitest run src/__tests__/contracts/ipc-contract.test.ts
+
+  real-cli-e2e:
+    name: Real CLI E2E (optional, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Pipeline E2E (deterministic, hermetic)
+        run: cargo test -p sourceforge --lib pipeline::tests
+      - name: Real agent run (optional — requires provider key)
+        if: env.OPENROUTER_API_KEY != ''
+        run: |
+          npm i -g opencode-ai@latest || true
+          if [ -d tools/fixtures/fixture-repo ]; then
+            cargo run -p dogfood -- --agent opencode tools/fixtures/fixture-repo
+          else
+            echo "fixture repo not present yet — real-CLI run deferred to Wave D Step 4.4"
+          fi
