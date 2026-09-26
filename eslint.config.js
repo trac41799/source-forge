@@ -5,7 +5,16 @@ export default tseslint.config(
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
   {
-    ignores: ["dist/**", "node_modules/**", "src-tauri/target/**"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "**/node_modules/**",
+      "target/**",
+      "**/target/**",
+      "**/.next/**",
+      ".worktrees/**",
+      "src-tauri/target/**",
+    ],
   },
   {
     rules: {

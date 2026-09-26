@@ -108,7 +108,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const skills = await invoke<SkillEntry[]>("scan_skills", { path });
-      set({ skills, loading: false });
+      set({ skills: skills ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -124,7 +124,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
       const memoryFiles = await invoke<MemoryFileEntry[]>("scan_memory", {
         projectPath,
       });
-      set({ memoryFiles, loading: false });
+      set({ memoryFiles: memoryFiles ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -145,7 +145,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const mcps = await invoke<MCPEntry[]>("list_mcps", { agentConfigPath });
-      set({ mcps, loading: false });
+      set({ mcps: mcps ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -175,7 +175,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
   ) => {
     await invoke("store_secret", { keyName, value, scope, agentId, projectId });
     const secrets = await invoke<VaultEntry[]>("list_secrets");
-    set({ secrets });
+    set({ secrets: secrets ?? [] });
   },
 
   deleteSecret: async (id: string) => {
@@ -188,7 +188,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const secrets = await invoke<VaultEntry[]>("list_secrets");
-      set({ secrets, loading: false });
+      set({ secrets: secrets ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -202,7 +202,7 @@ export const useAssetStore = create<AssetStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const plugins = await invoke<string[]>("list_plugins");
-      set({ plugins, loading: false });
+      set({ plugins: plugins ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }

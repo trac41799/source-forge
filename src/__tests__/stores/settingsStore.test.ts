@@ -1,10 +1,12 @@
 import { useSettingsStore } from "@/stores/settingsStore";
+import { mockInvoke } from "../setup";
 
 beforeEach(() => {
   useSettingsStore.setState({
     theme: "dark",
     defaults: { projectPath: "", agentId: "opencode", modelId: "" },
     sidebarCollapsed: { work: false, review: true, configure: true, automate: true, system: true },
+    stackPreferences: null,
   });
   localStorage.clear();
 });
@@ -95,6 +97,83 @@ describe("settingsStore", () => {
       const { sidebarCollapsed } = useSettingsStore.getState();
       expect(sidebarCollapsed.work).toBe(true);
       expect(sidebarCollapsed.review).toBe(false);
+    });
+  });
+
+  describe("stack preferences (backend)", () => {
+    it("loadDefaults reads preferences from the backend", async () => {
+      mockInvoke.mockResolvedValueOnce({
+        preferred_stack: "express-react-supabase",
+        default_deploy_target: "vercel",
+        auto_provision: true,
+      });
+
+      await useSettingsStore.getState().loadDefaults();
+
+      expect(mockInvoke).toHaveBeenCalledWith("get_preferences_cmd");
+      expect(useSettingsStore.getState().stackPreferences?.preferred_stack).toBe(
+        "express-react-supabase"
+      );
+    });
+
+    it("updateDefaults persists defaultStack via set_preferences_cmd", async () => {
+      mockInvoke
+        .mockResolvedValueOnce({
+          preferred_stack: "nextjs-supabase-vercel",
+          default_deploy_target: "vercel",
+          auto_provision: true,
+        })
+        .mockResolvedValueOnce({
+          preferred_stack: "nextjs-supabase-fastapi",
+          default_deploy_target: "vercel",
+          auto_provision: true,
+        });
+
+      await useSettingsStore.getState().loadDefaults();
+      await useSettingsStore.getState().updateDefaults({
+        defaultStack: "nextjs-supabase-fastapi",
+      });
+
+      expect(mockInvoke).toHaveBeenLastCalledWith("set_preferences_cmd", {
+        preferences: {
+          preferred_stack: "nextjs-supabase-fastapi",
+          default_deploy_target: "vercel",
+          auto_provision: true,
+        },
+      });
+      expect(useSettingsStore.getState().stackPreferences?.preferred_stack).toBe(
+        "nextjs-supabase-fastapi"
+      );
+    });
+
+    it("updateDefaults falls back to defaults when nothing was loaded", async () => {
+      mockInvoke.mockResolvedValueOnce({
+        preferred_stack: "nextjs-prisma-vercel",
+        default_deploy_target: "vercel",
+        auto_provision: true,
+      });
+
+      await useSettingsStore.getState().updateDefaults({
+        defaultStack: "nextjs-prisma-vercel",
+      });
+
+      expect(mockInvoke).toHaveBeenCalledWith("set_preferences_cmd", {
+        preferences: {
+          preferred_stack: "nextjs-prisma-vercel",
+          default_deploy_target: "vercel",
+          auto_provision: true,
+        },
+      });
+    });
+
+    it("loadDefaults falls back to defaults when the backend fails", async () => {
+      mockInvoke.mockRejectedValueOnce(new Error("no db"));
+
+      await useSettingsStore.getState().loadDefaults();
+
+      expect(useSettingsStore.getState().stackPreferences?.preferred_stack).toBe(
+        "nextjs-supabase-vercel"
+      );
     });
   });
 });

@@ -1,5 +1,6 @@
 import os
 import sys
+import types
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
@@ -7,6 +8,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+
+# The webhook-server directory name contains a hyphen, so it cannot be imported
+# as `webhook_server` directly. Alias it as an importable package for tests.
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+if "webhook_server" not in sys.modules:
+    _pkg = types.ModuleType("webhook_server")
+    _pkg.__path__ = [str(_REPO_ROOT / "webhook-server")]
+    sys.modules["webhook_server"] = _pkg
 
 
 @pytest.fixture

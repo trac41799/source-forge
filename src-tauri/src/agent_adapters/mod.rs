@@ -76,10 +76,14 @@ impl AgentAdapter for MockAgentAdapter {
 
     fn parse_cost(&self, output: &str) -> Option<f64> {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(output) {
-            v.get("cost_usd").and_then(|x| x.as_f64())
-        } else {
-            None
+            if let Some(c) = v.get("cost_usd").and_then(|x| x.as_f64()) {
+                return Some(c);
+            }
+            if let Some(c) = v.get("usage").and_then(|u| u.get("cost")).and_then(|x| x.as_f64()) {
+                return Some(c);
+            }
         }
+        None
     }
 }
 

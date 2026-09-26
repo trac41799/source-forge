@@ -281,7 +281,7 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
   },
   getOpenSignals: async (sessionId) => {
     const signals = await invoke<ACBSignal[]>("get_open_signals_cmd", { sessionId });
-    set({ acbSignals: signals });
+    set({ acbSignals: signals ?? [] });
   },
   resolveSignal: async (signalId) => {
     await invoke("resolve_signal_cmd", { signalId });
@@ -295,7 +295,7 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
   },
   getMemoryCandidates: async (sessionId, status) => {
     const candidates = await invoke<MemoryCandidate[]>("get_memory_candidates_cmd", { sessionId, status });
-    set({ memoryCandidates: candidates });
+    set({ memoryCandidates: candidates ?? [] });
   },
   buildPlaybookManifest: async (name, project, stacks, includeSkills, includeMemory, includePresets) => {
     const manifest = await invoke<PlaybookManifest>("build_playbook_manifest_cmd", { name, project, stacks, includeSkills, includeMemory, includePresets });

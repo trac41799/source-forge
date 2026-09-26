@@ -1,4 +1,17 @@
 import { create } from "zustand";
+import { invoke } from "@tauri-apps/api/core";
+
+export interface StackPreferences {
+  preferred_stack: string;
+  default_deploy_target: string;
+  auto_provision: boolean;
+}
+
+export const DEFAULT_STACK_PREFERENCES: StackPreferences = {
+  preferred_stack: "nextjs-supabase-vercel",
+  default_deploy_target: "vercel",
+  auto_provision: true,
+};
 
 interface SettingsState {
   theme: string;
@@ -7,10 +20,13 @@ interface SettingsState {
     agentId: string;
     modelId: string;
   };
+  stackPreferences: StackPreferences | null;
   onboardingCompleted: boolean;
   forceShowOnboarding: boolean;
   sidebarCollapsed: Record<string, boolean>;
   loadSettings: () => void;
+  loadDefaults: () => Promise<void>;
+  updateDefaults: (partial: { defaultStack?: string }) => Promise<void>;
   saveSettings: (partial: Partial<SettingsState>) => void;
   resetDefaults: () => void;
   setOnboardingCompleted: () => void;
@@ -42,6 +58,7 @@ const DEFAULT_SETTINGS = {
 
 export const useSettingsStore = create<SettingsState>((set, get) => ({
   ...DEFAULT_SETTINGS,
+  stackPreferences: null,
 
   loadSettings: () => {
     try {
@@ -60,8 +77,32 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
-  saveSettings: (partial) => {
-    set(partial);
+  loadDefaults: async () => {
+    try {
+      const prefs = await invoke<StackPreferences>("get_preferences_cmd");
+      set({ stackPreferences: prefs ?? DEFAULT_STACK_PREFERENCES });
+    } catch {
+      set({ stackPreferences: DEFAULT_STACK_PREFERENCES });
+    }
+  },
+
+  updateDefaults: async (partial) => {
+    const current = get().stackPreferences ?? DEFAULT_STACK_PREFERENCES;
+    const next: StackPreferences = {
+      ...current,
+      preferred_stack: partial.defaultStack ?? current.preferred_stack,
+    };
+    try {
+      const saved = await invoke<StackPreferences>("set_preferences_cmd", {
+        preferences: next,
+      });
+      set({ stackPreferences: saved ?? next });
+    } catch {
+      set({ stackPreferences: next });
+    }
+  },
+
+  saveSettings: (partial) => {    set(partial);
     const current = get();
     localStorage.setItem(
       STORAGE_KEY,

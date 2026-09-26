@@ -686,6 +686,139 @@ pub async fn seed_wave_from_spec_cmd(
     Ok(plan)
 }
 
+// ── Deployment Verification Phase (Wave 5) ───────────────────────────
+
+#[tauri::command]
+pub async fn verify_project_cmd(
+    project_path: String,
+) -> Result<crate::verification::VerificationReport, String> {
+    use std::path::Path;
+    Ok(crate::verification::verify_project(Path::new(&project_path)))
+}
+
+#[tauri::command]
+pub async fn verify_and_finalize_wave_cmd(
+    state: State<'_, AppState>,
+    report: wave_executor::WaveExecutionReport,
+    project_path: String,
+) -> Result<serde_json::Value, String> {
+    use std::path::Path;
+    let mut wave_report = wave_executor::finalize_wave(&state.db, report).await?;
+    let verify = crate::verification::verify_project(Path::new(&project_path));
+    Ok(serde_json::json!({
+        "wave": wave_report,
+        "verification": verify
+    }))
+}
+
+#[tauri::command]
+pub async fn generate_deploy_config_cmd(
+    project_path: String,
+) -> Result<String, String> {
+    use std::path::Path;
+    let vercel_path = crate::verification::generate_vercel_config(Path::new(&project_path))?;
+    Ok(format!("Generated: {}", vercel_path.display()))
+}
+
+// ── Stack Registry Commands ─────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_available_stacks_cmd() -> Result<Vec<crate::stack_registry::StackPreset>, String> {
+    Ok(crate::stack_registry::StackPreset::all().to_vec())
+}
+
+#[tauri::command]
+pub async fn detect_installed_clis_cmd(
+) -> Result<std::collections::HashMap<String, crate::stack_registry::CliStatus>, String> {
+    Ok(crate::stack_registry::detect_installed_clis())
+}
+
+#[tauri::command]
+pub async fn recommend_stack_cmd() -> Result<crate::stack_registry::StackPreset, String> {
+    let status = crate::stack_registry::detect_installed_clis();
+    crate::stack_registry::recommend_stack(&status)
+        .cloned()
+        .ok_or_else(|| "No stack available".to_string())
+}
+
+#[tauri::command]
+pub async fn missing_clis_for_stack_cmd(
+    stack_id: String,
+) -> Result<Vec<String>, String> {
+    let status = crate::stack_registry::detect_installed_clis();
+    Ok(crate::stack_registry::missing_clis_for_stack(&stack_id, &status))
+}
+
+// ── User Preferences Commands ──────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_preferences_cmd(
+    state: State<'_, AppState>,
+) -> Result<crate::preferences::UserPreferences, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::preferences::get_preferences(&db)
+}
+
+#[tauri::command]
+pub async fn set_preferences_cmd(
+    state: State<'_, AppState>,
+    preferences: crate::preferences::UserPreferences,
+) -> Result<crate::preferences::UserPreferences, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::preferences::set_preferences(&db, &preferences)?;
+    crate::preferences::get_preferences(&db)
+}
+
+// ── Infrastructure Provisioner Commands ────────────────────────────
+
+#[tauri::command]
+pub async fn provision_stack_cmd(
+    stack_id: String,
+) -> Result<crate::provisioner::ProvisionReport, String> {
+    Ok(crate::provisioner::provision(&stack_id))
+}
+
+#[tauri::command]
+pub async fn check_cli_cmd(
+    tool: String,
+) -> Result<crate::stack_registry::CliStatus, String> {
+    Ok(crate::provisioner::check_cli(&tool))
+}
+
+#[tauri::command]
+pub async fn install_cli_cmd(
+    tool: String,
+) -> Result<bool, String> {
+    crate::provisioner::install_cli(&tool).map(|_| true)
+}
+
+// ── Architecture Engine Commands ──────────────────────────────────
+
+#[tauri::command]
+pub async fn scaffold_project_cmd(
+    stack_id: String,
+    project_path: String,
+    project_name: String,
+) -> Result<crate::arch_engine::ScaffoldReport, String> {
+    crate::arch_engine::scaffold_project(&stack_id, &project_path, &project_name)
+}
+
+// ── Delegation Commands ───────────────────────────────────────────
+
+#[tauri::command]
+pub async fn create_delegation_report_cmd(
+    tasks: Vec<serde_json::Value>,
+) -> Result<crate::delegation::DelegationReport, String> {
+    let mut report = crate::delegation::DelegationReport::new();
+    for t in tasks {
+        let step = t["step"].as_str().unwrap_or("");
+        let instructions = t["instructions"].as_str().unwrap_or("");
+        let reason = t["reason"].as_str().unwrap_or("");
+        report.add_task(step, instructions, reason);
+    }
+    Ok(report)
+}
+
 #[tauri::command]
 pub async fn create_correction_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, bug_desc: String, root_cause: String, fix_required: String, test_required: String, retry_number: i64) -> Result<orchestrator::CorrectionDoc, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;

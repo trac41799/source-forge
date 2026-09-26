@@ -162,7 +162,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => ({
         limit: filters.limit,
         offset: filters.offset,
       });
-      set({ items, loading: false });
+      set({ items: items ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -239,7 +239,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => ({
       const items = await invoke<KnowledgeItem[]>("compound_knowledge_cmd", {
         projectId,
       });
-      set({ items, loading: false });
+      set({ items: items ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -252,7 +252,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => ({
         q,
       });
       const currentFilters = get().filters;
-      set({ items, filters: { ...currentFilters, q }, loading: false });
+      set({ items: items ?? [], filters: { ...currentFilters, q }, loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }

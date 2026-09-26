@@ -1,19 +1,19 @@
-mod acb;
+pub mod acb;
 mod agent_adapters;
 mod agent_events;
 mod assets;
-mod budget;
+pub mod budget;
 mod commands;
-mod control;
-mod db;
-mod events;
+pub mod control;
+pub mod db;
+pub mod events;
 mod integrations;
-mod intelligence;
-mod knowledge;
-mod orchestrator;
+pub mod intelligence;
+pub mod knowledge;
+pub mod orchestrator;
 mod playbook;
 mod pty;
-mod routing;
+pub mod routing;
 mod scheduler;
 mod skillbridge;
 mod backward_channel;
@@ -30,8 +30,16 @@ mod pty_guards;
 mod handoff_parser;
 mod wave_executor;
 mod spec_parser;
+mod verification;
 mod wave_persistence;
 mod integration_tests;
+mod stack_registry;
+mod preferences;
+mod provisioner;
+mod arch_engine;
+mod delegation;
+#[allow(dead_code)] // M0: consumed by tests; wired into commands in M1
+mod decision;
 
 use commands::AppState;
 use log::info;
@@ -108,6 +116,20 @@ pub fn run() {
             commands::execute_wave_cmd,
             commands::finalize_wave_cmd,
             commands::seed_wave_from_spec_cmd,
+            commands::verify_project_cmd,
+            commands::verify_and_finalize_wave_cmd,
+            commands::generate_deploy_config_cmd,
+            commands::list_available_stacks_cmd,
+            commands::detect_installed_clis_cmd,
+            commands::recommend_stack_cmd,
+            commands::missing_clis_for_stack_cmd,
+            commands::get_preferences_cmd,
+            commands::set_preferences_cmd,
+            commands::provision_stack_cmd,
+            commands::check_cli_cmd,
+            commands::install_cli_cmd,
+            commands::scaffold_project_cmd,
+            commands::create_delegation_report_cmd,
             commands::log_event,
             commands::log_event_with_payload,
             commands::get_events,

@@ -18,6 +18,8 @@ import {
   Brain,
   Layers,
   Sparkles,
+  Cpu,
+  Terminal,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import PositioningPanel from "@/components/PositioningPanel";
@@ -29,6 +31,13 @@ interface IntegrationStatus {
   icon: typeof Globe;
 }
 
+const STACK_OPTIONS = [
+  { id: "nextjs-supabase-vercel", name: "Next.js + Supabase + Vercel", desc: "Full-stack with API routes, PostgreSQL, edge deployment" },
+  { id: "nextjs-supabase-fastapi", name: "Next.js + Supabase + FastAPI", desc: "Next.js frontend, Python FastAPI backend, PostgreSQL" },
+  { id: "express-react-supabase", name: "Express + React + Supabase", desc: "Express API, React Vite frontend, PostgreSQL" },
+  { id: "nextjs-prisma-vercel", name: "Next.js + Prisma + Vercel Postgres", desc: "Next.js with Prisma ORM, Vercel managed Postgres" },
+];
+
 export default function SettingsPage() {
   const store = useSettingsStore();
   const { theme, setTheme } = useTheme();
@@ -39,6 +48,7 @@ export default function SettingsPage() {
 
   useEffect(() => {
     store.loadSettings();
+    void store.loadDefaults();
   }, []);
 
   useEffect(() => {
@@ -284,6 +294,54 @@ export default function SettingsPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </Card>
+
+        {/* Stack Preferences */}
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Cpu className="size-5" />
+            <h2 className="text-lg font-semibold">Default Stack</h2>
+          </div>
+          <Separator />
+          <p className="text-sm text-muted-foreground">
+            Choose your preferred technology stack for new projects.
+            SourceForge will provision infrastructure and scaffold projects accordingly.
+          </p>
+          <div className="grid grid-cols-1 gap-3">
+            {STACK_OPTIONS.map((stack) => {
+              const selected =
+                stack.id ===
+                (store.stackPreferences?.preferred_stack ??
+                  "nextjs-supabase-vercel");
+              return (
+                <button
+                  key={stack.id}
+                  aria-pressed={selected}
+                  className={cn(
+                    "flex items-start gap-3 rounded-lg border p-4 text-left transition-colors hover:border-primary/50",
+                    selected ? "border-primary bg-primary/5" : "border-border"
+                  )}
+                  onClick={() => {
+                    void store.updateDefaults({ defaultStack: stack.id });
+                  }}
+                  title={selected ? "Default" : ""}
+                >
+                  <div className={cn("mt-0.5 size-4 rounded-full border-2 flex-shrink-0", selected ? "border-primary bg-primary" : "border-muted-foreground/30")} />
+                  <div>
+                    <div className="text-sm font-medium">{stack.name}</div>
+                    <div className="text-xs text-muted-foreground">{stack.desc}</div>
+                  </div>
+                  {selected && <span className="ml-auto text-[10px] text-primary font-medium">DEFAULT</span>}
+                </button>
+              );
+            })}
+          </div>
+          <div className="flex items-center gap-2 pt-2">
+            <Terminal className="size-4 text-muted-foreground" />
+            <span className="text-xs text-muted-foreground">
+              CLI tools: Node.js, npm, Vercel CLI required. Supabase MCP auto-detected.
+            </span>
           </div>
         </Card>
 
