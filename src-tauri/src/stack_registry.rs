@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::process::Command;
+use std::sync::LazyLock;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CliStatus {
@@ -31,7 +32,7 @@ pub struct StackPreset {
 }
 
 /// The canonical stack registry. Order matters: first is default.
-pub static STACK_REGISTRY: &[StackPreset] = &[
+pub static STACK_REGISTRY: LazyLock<Vec<StackPreset>> = LazyLock::new(|| vec![
     StackPreset {
         id: "nextjs-supabase-vercel".into(),
         name: "Next.js + Supabase + Vercel".into(),
@@ -84,7 +85,7 @@ pub static STACK_REGISTRY: &[StackPreset] = &[
         api_dir: "app/api".into(),
         is_default: false,
     },
-];
+]);
 
 impl StackPreset {
     pub fn default_stack() -> &'static StackPreset {
@@ -99,7 +100,7 @@ impl StackPreset {
     }
 
     pub fn all() -> &'static [StackPreset] {
-        STACK_REGISTRY
+        &STACK_REGISTRY[..]
     }
 
     pub fn all_ids() -> Vec<&'static str> {
@@ -133,7 +134,7 @@ pub fn detect_installed_clis() -> HashMap<String, CliStatus> {
 /// Recommend the best stack based on available CLIs.
 /// Returns the first stack where all required CLIs are installed.
 pub fn recommend_stack(cli_status: &HashMap<String, CliStatus>) -> Option<&'static StackPreset> {
-    for stack in STACK_REGISTRY {
+    for stack in STACK_REGISTRY.iter() {
         let all_installed = stack
             .required_cli
             .iter()
@@ -166,7 +167,7 @@ mod tests {
 
     #[test]
     fn test_all_stacks_have_required_fields() {
-        for stack in STACK_REGISTRY {
+        for stack in STACK_REGISTRY.iter() {
             assert!(!stack.id.is_empty(), "Stack {} has empty id", stack.name);
             assert!(!stack.name.is_empty());
             assert!(!stack.frameworks.is_empty());
@@ -277,5 +278,23 @@ mod tests {
         );
         assert_ne!(CliStatus::Installed("1.0".into()), CliStatus::Missing);
         assert_eq!(CliStatus::Missing, CliStatus::Missing);
+    }
+
+    #[test]
+    fn test_registry_has_four_stacks() {
+        assert_eq!(
+            StackPreset::all().len(),
+            4,
+            "registry should define exactly 4 stacks"
+        );
+    }
+
+    #[test]
+    fn test_get_by_id_roundtrip_for_all_ids() {
+        for id in StackPreset::all_ids() {
+            let stack = StackPreset::get_by_id(id);
+            assert!(stack.is_some(), "all_ids entry {id} must resolve via get_by_id");
+            assert_eq!(stack.unwrap().id, id);
+        }
     }
 }

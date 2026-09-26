@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import SettingsPage from "@/pages/Settings";
+import { mockInvoke } from "../setup";
 
 function renderSettings() {
   return render(
@@ -82,6 +83,26 @@ describe("SettingsPage", () => {
   it("renders font size selector", () => {
     renderSettings();
     expect(screen.getByDisplayValue("Medium")).toBeInTheDocument();
+  });
+
+  it("clicking a stack card selects it and persists via backend", async () => {
+    mockInvoke.mockResolvedValue({
+      preferred_stack: "nextjs-supabase-vercel",
+      default_deploy_target: "vercel",
+      auto_provision: true,
+    });
+    renderSettings();
+
+    const fastapiCard = await screen.findByText("Next.js + Supabase + FastAPI");
+    await userEvent.click(fastapiCard);
+
+    expect(mockInvoke).toHaveBeenLastCalledWith("set_preferences_cmd", {
+      preferences: {
+        preferred_stack: "nextjs-supabase-fastapi",
+        default_deploy_target: "vercel",
+        auto_provision: true,
+      },
+    });
   });
 
   describe("Why ACC positioning panel", () => {

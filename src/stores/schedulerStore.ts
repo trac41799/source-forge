@@ -106,7 +106,7 @@ export const useSchedulerStore = create<SchedulerStore>((set, get) => ({
     set({ loading: true, error: null });
     try {
       const jobs = await invoke<CronJob[]>("get_cron_jobs_cmd", { projectId, enabledOnly: false });
-      set({ jobs, loading: false });
+      set({ jobs: jobs ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -187,7 +187,7 @@ export const useSchedulerStore = create<SchedulerStore>((set, get) => ({
         jobId: jobId ?? null,
         status: null,
       });
-      set({ executions, loading: false });
+      set({ executions: executions ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -213,7 +213,7 @@ export const useSchedulerStore = create<SchedulerStore>((set, get) => ({
         projectId: null,
         enabledOnly: false,
       });
-      set({ escalations: all.filter((j) => j.enabled) });
+      set({ escalations: (all ?? []).filter((j) => j.enabled) });
     } catch (e) {
       set({ error: String(e) });
     }

@@ -47,6 +47,15 @@ pub fn parse_gap_closure_plan(markdown: &str) -> Vec<SpecTask> {
                     .chars()
                     .take_while(|c| c.is_ascii_digit())
                     .collect::<String>();
+                // Flush any in-flight step under the OLD phase before switching,
+                // otherwise the last step of a phase is stamped with the next phase id.
+                if let (Some(phase), Some((step_id, title))) = (&current_phase, &current_step) {
+                    if let Some(task) = build_task(phase, step_id, title, &current_body) {
+                        tasks.push(task);
+                    }
+                }
+                current_step = None;
+                current_body.clear();
                 current_phase = Some(phase_id);
             }
             continue;
@@ -93,13 +102,18 @@ pub fn parse_gap_closure_plan(markdown: &str) -> Vec<SpecTask> {
 fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Option<SpecTask> {
     let body_text = body.join("\n");
 
-    // Wave: 1=Security, 2=UX, 3=Docs
-    let wave = match phase {
+    // Wave: explicit `**Wave:** A` marker wins; fallback 1=Security, 2=UX, 3=Docs
+    let fallback_wave = match phase {
         "1" => 1,
         "2" => 2,
         "3" => 3,
-        _ => 99, // Validation etc.
+        _ => 99,
     };
+    let wave = body
+        .iter()
+        .find_map(|l| extract_marker_value(l, "**Wave:**"))
+        .and_then(|v| wave_from_marker(&v))
+        .unwrap_or(fallback_wave);
 
     // Files to create: look for `**Create:** \`path\`` or `**Create:** file`
     let files_create = extract_paths_after(&body_text, &["**Create:**", "**Write failing test first:**", "**Create file:**", "**Create or modify:**"]);
@@ -121,14 +135,32 @@ fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Optio
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
 
-    // Depends-on: any "1.1" or "1.2" reference in the body
-    let depends_on = if body_text.contains("1.1") && step_id != "1.1" {
-        Some("1.1".to_string())
-    } else if body_text.contains("1.2") && step_id != "1.2" && !body_text.contains("1.1") {
-        Some("1.2".to_string())
-    } else {
-        None
-    };
+    // Depends-on: explicit `**Depends on:** X.Y` marker wins; legacy heuristic
+    // (any "1.1"/"1.2" reference in the body) is kept for older specs.
+    let marker_dep = body
+        .iter()
+        .find_map(|l| extract_marker_value(l, "**Depends on:**"))
+        .and_then(|v| {
+            let token = v.split_whitespace().next().unwrap_or("");
+            let cleaned: String = token
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if cleaned.chars().any(|c| c.is_ascii_digit()) {
+                Some(cleaned)
+            } else {
+                None
+            }
+        });
+    let depends_on = marker_dep.or_else(|| {
+        if body_text.contains("1.1") && step_id != "1.1" {
+            Some("1.1".to_string())
+        } else if body_text.contains("1.2") && step_id != "1.2" && !body_text.contains("1.1") {
+            Some("1.2".to_string())
+        } else {
+            None
+        }
+    });
 
     let verify_deploy = phase == "5" || title.to_lowercase().contains("deploy") || title.to_lowercase().contains("verify");
 
@@ -145,8 +177,35 @@ fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Optio
     })
 }
 
-fn extract_paths_after(text: &str, markers: &[&str]) -> Vec<String> {
-    let mut out = Vec::new();
+/// Extract the value after a `**Marker:**` anywhere on a line.
+/// Values are terminated by `·` (the plan's field separator) or end of line.
+/// Returns None for empty values and for `—`/`-` placeholders (meaning "none").
+fn extract_marker_value(line: &str, marker: &str) -> Option<String> {
+    let idx = line.find(marker)?;
+    let rest = &line[idx + marker.len()..];
+    let value = rest.split('·').next().unwrap_or("").trim();
+    if value.is_empty() || value == "—" || value == "-" {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+/// Map a `**Wave:**` value to a wave number. Accepts "A".."E" or a digit.
+fn wave_from_marker(value: &str) -> Option<i64> {
+    let c = value.chars().next()?;
+    if c.is_ascii_digit() {
+        return c.to_digit(10).map(i64::from);
+    }
+    let upper = c.to_ascii_uppercase();
+    if ('A'..='E').contains(&upper) {
+        Some((upper as u8 - b'A' + 1) as i64)
+    } else {
+        None
+    }
+}
+
+fn extract_paths_after(text: &str, markers: &[&str]) -> Vec<String> {    let mut out = Vec::new();
     for marker in markers {
         if let Some(idx) = text.find(marker) {
             // Take next 3 lines and extract anything that looks like a file path
@@ -278,8 +337,54 @@ Acceptance: All 5 tests pass
     }
 
     #[test]
-    fn test_tasks_to_markdown() {
-        let tasks = vec![SpecTask {
+    fn test_parse_reads_wave_marker() {
+        let md = "## Phase 1: X\n### Step 1.1: A\n**Wave:** C · **Depends on:** — · **Owner:** x\nbody\n";
+        let tasks = parse_gap_closure_plan(md);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].wave, 3, "marker must override phase fallback");
+        assert_eq!(tasks[0].depends_on, None);
+    }
+
+    #[test]
+    fn test_parse_reads_depends_marker() {
+        let md = "## Phase 2: X\n### Step 2.1: A\n**Wave:** B · **Depends on:** 1.1 · **Owner:** x\nbody\n";
+        let tasks = parse_gap_closure_plan(md);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].wave, 2);
+        assert_eq!(tasks[0].depends_on, Some("1.1".to_string()));
+    }
+
+    #[test]
+    fn test_wave_falls_back_to_phase_when_absent() {
+        let md = "## Phase 3: X\n### Step 3.1: A\nplain body without markers\n";
+        let tasks = parse_gap_closure_plan(md);
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].wave, 3);
+    }
+
+    #[test]
+    fn test_parses_project_tdd_plan() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../docs/2026-09-26-defect-closure/TDD_PLAN.md");
+        let content = std::fs::read_to_string(&path).expect("TDD plan must exist");
+        let tasks = parse_gap_closure_plan(&content);
+        assert!(tasks.len() >= 30, "expected >=30 tasks, got {}", tasks.len());
+        for t in &tasks {
+            assert!(
+                (1..=5).contains(&t.wave),
+                "task {} has wave {} (markers not parsed?)",
+                t.step,
+                t.wave
+            );
+        }
+        let s11 = tasks.iter().find(|t| t.step == "1.1").expect("step 1.1");
+        assert_eq!(s11.wave, 1);
+        let s31 = tasks.iter().find(|t| t.step == "3.1").expect("step 3.1");
+        assert_eq!(s31.wave, 3);
+    }
+
+    #[test]
+    fn test_tasks_to_markdown() {        let tasks = vec![SpecTask {
             phase: "1".to_string(),
             step: "1.1".to_string(),
             title: "Test".to_string(),
@@ -288,6 +393,7 @@ Acceptance: All 5 tests pass
             files_modify: vec!["bar.ts".to_string()],
             wave: 1,
             depends_on: None,
+            verify_deploy: false,
         }];
         let md = tasks_to_markdown(&tasks);
         assert!(md.contains("Phase 1"));

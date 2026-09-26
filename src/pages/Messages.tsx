@@ -54,7 +54,8 @@ export function MessagePanel() {
     await store.resolveSignal(signalId);
   };
 
-  const filtered = store.acbSignals.filter((s) => {
+  const signals = store.acbSignals ?? [];
+  const filtered = signals.filter((s) => {
     if (priorityFilter && s.priority !== priorityFilter) return false;
     return true;
   });

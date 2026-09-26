@@ -86,6 +86,6 @@ describe("App", () => {
         <App />
       </MemoryRouter>
     );
-    expect(screen.getByText(/Integrations/i)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: /Integrations/i })).toBeInTheDocument();
   });
 });

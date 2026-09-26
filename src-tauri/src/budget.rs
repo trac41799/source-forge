@@ -106,8 +106,11 @@ fn compute_usage_percent(budget_used: i64, budget_total: i64) -> f64 {
 }
 
 fn build_agent_budget(row: &rusqlite::Row) -> rusqlite::Result<AgentBudget> {
-    let budget_total: i64 = row.get(5)?;
-    let budget_used: i64 = row.get(6)?;
+    // Column order from the SELECT: 0 id, 1 session_id, 2 plan_agent_id,
+    // 3 agent_id, 4 task_complexity, 5 model, 6 budget_total, 7 budget_used,
+    // 8 state, 9 wip_path, 10 created_at, 11 updated_at.
+    let budget_total: i64 = row.get(6)?;
+    let budget_used: i64 = row.get(7)?;
     Ok(AgentBudget {
         id: row.get(0)?,
         session_id: row.get(1)?,
@@ -117,11 +120,11 @@ fn build_agent_budget(row: &rusqlite::Row) -> rusqlite::Result<AgentBudget> {
         model: row.get(5)?,
         budget_total,
         budget_used,
-        state: row.get(7)?,
-        wip_path: row.get(8)?,
+        state: row.get(8)?,
+        wip_path: row.get(9)?,
         usage_percent: compute_usage_percent(budget_used, budget_total),
-        created_at: row.get(9)?,
-        updated_at: row.get(10)?,
+        created_at: row.get(10)?,
+        updated_at: row.get(11)?,
     })
 }
 

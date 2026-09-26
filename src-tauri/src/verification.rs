@@ -385,6 +385,16 @@ fn check_npm_build(base: &Path, report: &mut VerificationReport) {
     if !base.join("package.json").exists() {
         return;
     }
+    if !base.join("node_modules").exists() {
+        report.add(BuildCheck {
+            name: "npm run build passes".into(),
+            status: CheckStatus::Skip(
+                "node_modules not installed — run npm install before build verification".into(),
+            ),
+            detail: String::new(),
+        });
+        return;
+    }
     let output = Command::new("npm")
         .args(["run", "build"])
         .current_dir(base)
@@ -670,6 +680,15 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
         report.add(BuildCheck {
             name: "E2E runtime test".into(),
             status: CheckStatus::Skip("No server entry point found".into()),
+            detail: String::new(),
+        });
+        return;
+    }
+
+    if !base.join("node_modules").exists() {
+        report.add(BuildCheck {
+            name: "E2E runtime test".into(),
+            status: CheckStatus::Skip("node_modules not installed — cannot start server".into()),
             detail: String::new(),
         });
         return;
@@ -985,10 +1004,48 @@ mod tests {
         .unwrap();
         std::fs::write(
             base.join("src").join("api").join("client.ts"),
-            "const api = axios.create({ baseURL: '/api' });",
+            "const api = axios.create({ baseURL: import.meta.env.VITE_API_URL || '/api' });",
         )
         .unwrap();
         std::fs::create_dir_all(base.join("src").join("pages")).unwrap();
+
+        // Fixture completeness for the "all deterministic checks pass" test:
+        // README, env example, and a git repo with a remote are all required
+        // by verify_project; node_modules stays absent so build/E2E are Skip.
+        std::fs::write(
+            base.join("README.md"),
+            "# Fixture App\n\n\
+             ## Setup\n\n\
+             Run `npm install` to set up the project, then `npm run dev` for local development.\n\
+             Build for production with `npm run build` and preview with `npm start`.\n\n\
+             ## Environment Variables\n\n\
+             Copy `.env.example` to `.env` and fill in the required values.\n\
+             Required variables: JWT_SECRET, DATABASE_URL, PORT, CLIENT_URL.\n\n\
+             ## Architecture\n\n\
+             Vite + React single page application with an Express-compatible API surface.\n\
+             The frontend is built with TypeScript and tested with Vitest.\n\
+             Deployment targets Vercel with SPA rewrites excluding /api routes.\n\n\
+             ## Testing\n\n\
+             Run `npm test` for the unit suite and `npm run typecheck` for static analysis.\n\
+             The verification pipeline checks build output, SPA rewrites, and runtime smoke tests.\n",
+        )
+        .unwrap();
+
+        std::fs::write(
+            base.join(".env.example"),
+            "JWT_SECRET=change-me\nDATABASE_URL=postgres://localhost:5432/app\nPORT=3001\nCLIENT_URL=http://localhost:5173\n",
+        )
+        .unwrap();
+
+        let _ = Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(base)
+            .output();
+        let _ = Command::new("git")
+            .args(["remote", "add", "origin", "https://example.com/fixture-app.git"])
+            .current_dir(base)
+            .output();
+
         dir
     }
 

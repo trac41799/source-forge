@@ -110,7 +110,7 @@ export const useIntelligenceStore = create<IntelligenceStore>((set) => ({
 
   getOutcomeStats: async (projectId, agentId) => {
     const stats = await invoke<OutcomeStats[]>("get_outcome_stats_cmd", { projectId, agentId });
-    set({ outcomeStats: stats });
+    set({ outcomeStats: stats ?? [] });
   },
 
   createFailureAnalysis: async (sessionId, ptyExcerpt) => {
