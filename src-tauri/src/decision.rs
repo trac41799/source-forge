@@ -59,6 +59,12 @@ pub fn get_decision_config(conn: &Connection) -> Result<DecisionConfig, String> 
 }
 
 pub fn set_decision_config(conn: &Connection, cfg: &DecisionConfig) -> Result<(), String> {
+    if cfg.review_threshold > cfg.accept_threshold {
+        return Err(format!(
+            "review_threshold ({}) must be <= accept_threshold ({})",
+            cfg.review_threshold, cfg.accept_threshold
+        ));
+    }
     conn.execute(
         "INSERT INTO decision_config (id, backend, base_url, model, accept_threshold, review_threshold, context_limit, timeout_ms, updated_at)
          VALUES ('default', ?1, ?2, ?3, ?4, ?5, ?6, ?7, datetime('now'))
@@ -116,6 +122,8 @@ pub struct DecisionResult {
     pub answers: BTreeMap<String, DecisionAnswer>,
     pub input_tokens: i64,
     pub cost: f64,
+    #[serde(default)]
+    pub truncated: bool,
 }
 
 fn f64_map(v: Option<&serde_json::Value>) -> BTreeMap<String, f64> {
@@ -157,6 +165,15 @@ fn check_probabilities(kind: &str, probs: &BTreeMap<String, f64>) -> Result<(), 
     Ok(())
 }
 
+fn check_unit_range(name: &str, field: &str, v: f64) -> Result<(), DecisionError> {
+    if !(0.0..=1.0).contains(&v) {
+        return Err(DecisionError::Validation(format!(
+            "{name} {field}={v} out of [0,1]"
+        )));
+    }
+    Ok(())
+}
+
 /// Normalize a backend `/v1/systemone` response into typed answers (spec R2/R3).
 /// `choice`/`score` require a distribution summing to 1.0; `noul` has no wire
 /// confidence, so `confidence` is derived from its value.
@@ -180,9 +197,17 @@ pub fn normalize_response(json: &serde_json::Value) -> Result<DecisionResult, De
                 })?;
                 let probabilities = f64_map(ans.get("probabilities"));
                 check_probabilities("choice", &probabilities)?;
+                if let Some(label) = value.as_str() {
+                    if !probabilities.contains_key(label) {
+                        return Err(DecisionError::Validation(format!(
+                            "choice '{name}' value '{label}' not among offered labels"
+                        )));
+                    }
+                }
                 let confidence = ans.get("confidence").and_then(|c| c.as_f64()).ok_or_else(|| {
                     DecisionError::Validation(format!("choice '{name}' missing confidence"))
                 })?;
+                check_unit_range(name, "confidence", confidence)?;
                 DecisionAnswer {
                     kind: kind.into(),
                     value,
@@ -201,6 +226,7 @@ pub fn normalize_response(json: &serde_json::Value) -> Result<DecisionResult, De
                 let confidence = ans.get("confidence").and_then(|c| c.as_f64()).ok_or_else(|| {
                     DecisionError::Validation(format!("score '{name}' missing confidence"))
                 })?;
+                check_unit_range(name, "confidence", confidence)?;
                 DecisionAnswer {
                     kind: kind.into(),
                     value,
@@ -213,6 +239,7 @@ pub fn normalize_response(json: &serde_json::Value) -> Result<DecisionResult, De
                 let value = ans.get("noul").and_then(|n| n.as_f64()).ok_or_else(|| {
                     DecisionError::Malformed(format!("noul '{name}' missing 'noul'"))
                 })?;
+                check_unit_range(name, "noul", value)?;
                 DecisionAnswer {
                     kind: kind.into(),
                     value: serde_json::json!(value),
@@ -250,6 +277,7 @@ pub fn normalize_response(json: &serde_json::Value) -> Result<DecisionResult, De
         answers,
         input_tokens,
         cost,
+        truncated: false,
     })
 }
 
@@ -445,6 +473,8 @@ impl DecisionTransport for UreqTransport {
 }
 
 /// POST state+questions and normalize, with bounded backoff retries.
+/// Truncates text `state` to `cfg.context_limit` (R7) and records a
+/// `decision_usage` row on success and failure when `conn` is provided (R5).
 pub fn decision_request(
     cfg: &DecisionConfig,
     transport: &dyn DecisionTransport,
@@ -452,19 +482,88 @@ pub fn decision_request(
     state: &serde_json::Value,
     questions: &serde_json::Value,
     max_retries: u32,
+    conn: Option<&Connection>,
 ) -> Result<DecisionResult, DecisionError> {
+    // R7: truncate text state to the configured context limit before sending.
+    let (send_state, truncated) = match state {
+        serde_json::Value::String(s) => {
+            let (t, tr) = truncate_state(s, cfg.context_limit);
+            (serde_json::Value::String(t), tr)
+        }
+        other => {
+            if estimate_tokens(&other.to_string()) > cfg.context_limit {
+                return Err(DecisionError::Validation(format!(
+                    "structured state exceeds context_limit ({} tokens)",
+                    cfg.context_limit
+                )));
+            }
+            (other.clone(), false)
+        }
+    };
+
+    let backend_id = if cfg.backend == "local" { "local" } else { "hosted" };
     let url = endpoint(cfg);
-    let body = build_request_body(&cfg.model, state, questions);
+    let body = build_request_body(&cfg.model, &send_state, questions);
+    let started = std::time::Instant::now();
     let mut last = DecisionError::NoBackend;
+
     for attempt in 0..=max_retries {
         if attempt > 0 {
             let backoff = 10u64.saturating_mul(1 << (attempt - 1).min(6));
             std::thread::sleep(std::time::Duration::from_millis(backoff));
         }
         match transport.post(&url, api_key, &body) {
-            Ok(json) => return normalize_response(&json),
+            Ok(json) => {
+                let mut result = normalize_response(&json)?;
+                result.truncated = truncated;
+                if let Some(c) = conn {
+                    let conf = result
+                        .answers
+                        .values()
+                        .map(|a| a.confidence)
+                        .fold(0.0_f64, f64::max);
+                    let outcome = classify_confidence(cfg, conf);
+                    let _ = record_usage(
+                        c,
+                        &DecisionUsage {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            backend_id: backend_id.to_string(),
+                            model: result.model.clone(),
+                            primitives: result.answers.keys().cloned().collect::<Vec<_>>().join(","),
+                            answers: serde_json::to_string(&result.answers).unwrap_or_default(),
+                            confidence: conf,
+                            policy_outcome: outcome.as_str().to_string(),
+                            latency_ms: started.elapsed().as_millis() as i64,
+                            input_tokens: result.input_tokens,
+                            cost: result.cost,
+                            truncated,
+                        },
+                    );
+                }
+                return Ok(result);
+            }
             Err(e) => last = e,
         }
+    }
+
+    // R5: record a failure row too.
+    if let Some(c) = conn {
+        let _ = record_usage(
+            c,
+            &DecisionUsage {
+                id: uuid::Uuid::new_v4().to_string(),
+                backend_id: backend_id.to_string(),
+                model: cfg.model.clone(),
+                primitives: String::new(),
+                answers: String::new(),
+                confidence: 0.0,
+                policy_outcome: PolicyOutcome::Fallback.as_str().to_string(),
+                latency_ms: started.elapsed().as_millis() as i64,
+                input_tokens: 0,
+                cost: 0.0,
+                truncated,
+            },
+        );
     }
     Err(last)
 }
@@ -486,10 +585,11 @@ pub fn dispatch_mode(
     api_key: Option<&str>,
     state: &serde_json::Value,
     questions: &serde_json::Value,
+    conn: Option<&Connection>,
 ) -> Result<DecisionDispatch, DecisionError> {
     match mode {
         "decision" => Ok(DecisionDispatch::Decision(decision_request(
-            cfg, transport, api_key, state, questions, 2,
+            cfg, transport, api_key, state, questions, 2, conn,
         )?)),
         other => Ok(DecisionDispatch::Unsupported(other.to_string())),
     }
@@ -678,6 +778,7 @@ mod tests {
             &serde_json::json!("x"),
             &serde_json::json!({}),
             2,
+            None,
         )
         .unwrap_err();
         assert!(matches!(err, DecisionError::Transport(_)));
@@ -702,6 +803,7 @@ mod tests {
             &serde_json::json!("x"),
             &serde_json::json!({}),
             0,
+            None,
         )
         .unwrap();
         assert_eq!(res.answers.len(), 3);
@@ -757,6 +859,7 @@ mod tests {
             Some("k"),
             &serde_json::json!("x"),
             &serde_json::json!({}),
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -771,8 +874,124 @@ mod tests {
             None,
             &serde_json::json!("x"),
             &serde_json::json!({}),
+            None,
         )
         .unwrap();
         assert!(matches!(unsupported, DecisionDispatch::Unsupported(_)));
+    }
+
+    #[test]
+    fn records_usage_on_success() {
+        use std::sync::atomic::AtomicU32;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/016_decision_usage.sql")).unwrap();
+        let cfg = DecisionConfig::default();
+        let payload: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/jev_all.json")).unwrap();
+        let t = MockTransport { calls: AtomicU32::new(0), fail: false, payload };
+        let res = decision_request(
+            &cfg,
+            &t,
+            Some("k"),
+            &serde_json::json!("x"),
+            &serde_json::json!({}),
+            0,
+            Some(&conn),
+        )
+        .unwrap();
+        assert!(!res.truncated);
+        let (n, outcome, conf): (i64, String, f64) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(policy_outcome), MAX(confidence) FROM decision_usage",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "exactly one usage row on success");
+        assert_eq!(outcome, "accept", "fixture confidence 1.0 >= accept threshold");
+        assert!((conf - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn records_usage_on_failure() {
+        use std::sync::atomic::AtomicU32;
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/016_decision_usage.sql")).unwrap();
+        let cfg = DecisionConfig::default();
+        let t = MockTransport { calls: AtomicU32::new(0), fail: true, payload: serde_json::json!({}) };
+        let _ = decision_request(
+            &cfg,
+            &t,
+            None,
+            &serde_json::json!("x"),
+            &serde_json::json!({}),
+            0,
+            Some(&conn),
+        )
+        .unwrap_err();
+        let (n, outcome): (i64, String) = conn
+            .query_row(
+                "SELECT COUNT(*), MAX(policy_outcome) FROM decision_usage",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "one usage row on failure");
+        assert_eq!(outcome, "fallback");
+    }
+
+    #[test]
+    fn truncates_state_on_real_path() {
+        use std::sync::atomic::AtomicU32;
+        let cfg = DecisionConfig::default(); // context_limit 32000 tokens
+        let payload: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/jev_all.json")).unwrap();
+        let t = MockTransport { calls: AtomicU32::new(0), fail: false, payload };
+        let big = "a".repeat(200_000); // ~50k tokens > 32k
+        let res = decision_request(
+            &cfg,
+            &t,
+            None,
+            &serde_json::json!(big),
+            &serde_json::json!({}),
+            0,
+            None,
+        )
+        .unwrap();
+        assert!(res.truncated, "oversized text state must be flagged truncated");
+    }
+
+    #[test]
+    fn rejects_out_of_range_and_unoffered_values() {
+        let bad_noul = serde_json::json!({
+            "model": "m",
+            "answers": { "x": { "type": "noul", "noul": 1.2 } },
+            "usage": { "input_tokens": 1, "cost": 0.0 }
+        });
+        assert!(matches!(
+            normalize_response(&bad_noul),
+            Err(DecisionError::Validation(_))
+        ));
+
+        let bad_label = serde_json::json!({
+            "model": "m",
+            "answers": { "x": { "type": "choice", "choice": "bogus",
+                                "probabilities": {"a": 0.5, "b": 0.5}, "confidence": 0.6 } },
+            "usage": { "input_tokens": 1, "cost": 0.0 }
+        });
+        assert!(matches!(
+            normalize_response(&bad_label),
+            Err(DecisionError::Validation(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_inverted_thresholds() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/016_decision_usage.sql")).unwrap();
+        let mut cfg = DecisionConfig::default();
+        cfg.review_threshold = 0.9;
+        cfg.accept_threshold = 0.5;
+        assert!(set_decision_config(&conn, &cfg).is_err());
     }
 }

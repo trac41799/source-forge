@@ -38,6 +38,7 @@ mod preferences;
 mod provisioner;
 mod arch_engine;
 mod delegation;
+#[allow(dead_code)] // M0: consumed by tests; wired into commands in M1
 mod decision;
 
 use commands::AppState;

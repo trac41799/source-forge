@@ -29,7 +29,8 @@ are added in the foundation so later tiers can enqueue.
 ## Architecture deltas
 - New module `src-tauri/src/decision.rs` + `"decision"` mode; new tables
   `decision_usage` (migration 016) and `decision_reviews`.
-- Config (stored in `user_preferences`, no new config migration): `decision.backend`
+- Config stored in the `decision_config` single-row table (migration 016; not
+  `user_preferences`): `decision.backend`
   (hosted|local), `decision.base_url`, `decision.model`, `decision.accept_threshold`,
   `decision.review_threshold`, `decision.context_limit`, `decision.timeout_ms`.
 - Call sites replaced (fallback retained): daemon router, compounder category
