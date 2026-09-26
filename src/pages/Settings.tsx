@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import PositioningPanel from "@/components/PositioningPanel";
+import { DecisionPanel } from "@/components/DecisionPanel";
 
 interface IntegrationStatus {
   name: string;
@@ -127,6 +128,8 @@ export default function SettingsPage() {
     }
   };
 
+  const [showDecision, setShowDecision] = useState(false);
+
   return (
     <div className="flex h-full flex-col p-6 gap-6">
       <div className="page-header">
@@ -135,6 +138,17 @@ export default function SettingsPage() {
       </div>
 
       <div className="flex flex-col gap-6 max-w-2xl">
+        {/* Decision Layer (spec 001) */}
+        <Card className="p-6 space-y-4">
+          <button
+            onClick={() => setShowDecision((v) => !v)}
+            className="text-lg font-semibold"
+          >
+            Decision Layer {showDecision ? "▾" : "▸"}
+          </button>
+          {showDecision && <DecisionPanel />}
+        </Card>
+
         {/* Appearance */}
         <Card className="p-6 space-y-4">
           <div className="flex items-center gap-2">
