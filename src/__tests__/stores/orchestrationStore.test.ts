@@ -121,4 +121,33 @@ describe("orchestrationStore", () => {
       expect(useOrchestrationStore.getState().playbookManifest).toEqual(manifest);
     });
   });
+
+  describe("verification gate (SPEC-001 §5 DG-4)", () => {
+    it("finalizeWave calls verify_and_finalize_wave_cmd with report and projectPath", async () => {
+      const report = {
+        plan_id: "plan-1",
+        base_repo: "/repo",
+        agents: [],
+        started_at: "2026-09-26T00:00:00Z",
+        completed_at: null,
+        total_cost_usd: 0,
+      };
+      const verification = {
+        passed: false,
+        checks: [{ name: "SPA rewrite excludes /api", status: { Fail: "missing" }, detail: "" }],
+      };
+      mockInvoke.mockResolvedValueOnce({ wave: report, verification });
+
+      const result = await useOrchestrationStore
+        .getState()
+        .finalizeWave(report, "/repo/project");
+
+      expect(mockInvoke).toHaveBeenCalledWith("verify_and_finalize_wave_cmd", {
+        report,
+        projectPath: "/repo/project",
+      });
+      expect(result.verification.passed).toBe(false);
+      expect(result.wave.plan_id).toBe("plan-1");
+    });
+  });
 });

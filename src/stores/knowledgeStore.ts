@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { IPC } from "@/lib/ipc/commands";
 import type {
   KnowledgeItem,
   KnowledgeQuery,
@@ -302,7 +303,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => ({
   loadPreflight: async (stack) => {
     try {
       const preflight = await invoke<PreflightWarning[]>(
-        "get_preflight_warnings_cmd",
+        IPC.getPreflightWarnings,
         { stack }
       );
       set({ preflight, preflightStack: stack });
@@ -314,7 +315,7 @@ export const useKnowledgeStore = create<KnowledgeStore>((set, get) => ({
   runCompounder: async (sessionId, projectId) => {
     set({ compounderRunning: true, error: null });
     try {
-      const items = await invoke<KnowledgeItem[] | null>("run_compounder_cmd", {
+      const items = await invoke<KnowledgeItem[] | null>(IPC.runCompounder, {
         sessionId,
         projectId,
       });

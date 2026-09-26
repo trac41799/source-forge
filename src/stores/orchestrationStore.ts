@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { IPC } from "@/lib/ipc/commands";
 
 export interface TaskSuggestion {
   agent_id: string;
@@ -59,6 +60,28 @@ export interface WaveExecutionReport {
   started_at: string;
   completed_at: string | null;
   total_cost_usd: number;
+}
+
+/** Serde representation of Rust `CheckStatus` (unit + newtype variants). */
+export type VerificationCheckStatus =
+  | "Pass"
+  | { Fail: string }
+  | { Skip: string };
+
+export interface VerificationCheckResult {
+  name: string;
+  status: VerificationCheckStatus;
+  detail: string;
+}
+
+export interface VerificationReport {
+  passed: boolean;
+  checks: VerificationCheckResult[];
+}
+
+export interface VerifyAndFinalizeResult {
+  wave: WaveExecutionReport;
+  verification: VerificationReport;
 }
 
 export interface ParsedHandoffFile {
@@ -171,7 +194,10 @@ interface OrchestrationStore {
     deadlineSecs?: number,
     costCapUsd?: number,
   ) => Promise<WaveExecutionReport>;
-  finalizeWave: (report: WaveExecutionReport) => Promise<WaveExecutionReport>;
+  finalizeWave: (
+    report: WaveExecutionReport,
+    projectPath: string
+  ) => Promise<VerifyAndFinalizeResult>;
   createWorktree: (repoPath: string, branch: string, worktreePath: string, baseBranch: string) => Promise<string>;
   removeWorktree: (repoPath: string, worktreePath: string) => Promise<void>;
   listWorktrees: (repoPath: string) => Promise<string[]>;
@@ -240,7 +266,7 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
     return { valid, missing };
   },
   executeWave: async (planId, baseRepo, baseBranch, agentCommand, agentBaseArgs, deadlineSecs?, costCapUsd?) => {
-    return await invoke<WaveExecutionReport>("execute_wave_cmd", {
+    return await invoke<WaveExecutionReport>(IPC.executeWave, {
       planId,
       baseRepo,
       baseBranch,
@@ -250,8 +276,14 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
       costCapUsd: costCapUsd ?? null,
     });
   },
-  finalizeWave: async (report) => {
-    return await invoke<WaveExecutionReport>("finalize_wave_cmd", { report });
+  finalizeWave: async (report, projectPath) => {
+    // Verification gate (SPEC-001 §5 DG-4): the UI never finalizes on handoff
+    // file existence alone — every finalize runs deployment verification and
+    // returns both the wave report and the verification report.
+    return await invoke<VerifyAndFinalizeResult>(IPC.verifyAndFinalizeWave, {
+      report,
+      projectPath,
+    });
   },
   createWorktree: async (repoPath, branch, worktreePath, baseBranch) => {
     return await invoke<string>("create_worktree_cmd", { repoPath, branch, worktreePath, baseBranch });

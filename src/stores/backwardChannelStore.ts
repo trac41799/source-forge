@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { IPC } from "@/lib/ipc/commands";
 import type { ChatPlatformConfig, DaemonStatus, QueueInfo } from "@/lib/types";
 
 interface BackwardChannelStore {
@@ -49,10 +50,10 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const configs = await invoke<ChatPlatformConfig[]>(
-        "get_chat_platform_configs",
+        IPC.getChatPlatformConfigs,
         { projectId },
       );
-      set({ platformConfigs: configs, loading: false });
+      set({ platformConfigs: configs ?? [], loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
     }
@@ -61,7 +62,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
   savePlatformConfig: async (config) => {
     set({ loading: true, error: null });
     try {
-      await invoke("save_chat_platform_config", { config });
+      await invoke(IPC.saveChatPlatformConfig, { config });
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -71,7 +72,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
   deletePlatformConfig: async (id) => {
     set({ loading: true, error: null });
     try {
-      await invoke("delete_chat_platform_config", { id });
+      await invoke(IPC.deleteChatPlatformConfig, { id });
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -81,7 +82,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
   togglePlatformConfig: async (id, enabled) => {
     set({ error: null });
     try {
-      await invoke("toggle_chat_platform_config", { id, enabled });
+      await invoke(IPC.toggleChatPlatformConfig, { id, enabled });
     } catch (e) {
       set({ error: String(e) });
     }
@@ -90,7 +91,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
   startDaemon: async (configPath) => {
     set({ loading: true, error: null });
     try {
-      await invoke("start_backward_channel_daemon", { configPath });
+      await invoke(IPC.startBackwardChannelDaemon, { configPath });
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -100,7 +101,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
   stopDaemon: async () => {
     set({ loading: true, error: null });
     try {
-      await invoke("stop_backward_channel_daemon");
+      await invoke(IPC.stopBackwardChannelDaemon);
       set({ loading: false });
     } catch (e) {
       set({ error: String(e), loading: false });
@@ -111,7 +112,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const status = await invoke<DaemonStatus>(
-        "get_backward_channel_daemon_status",
+        IPC.getBackwardChannelDaemonStatus,
       );
       set({ daemonStatus: status, loading: false });
     } catch (e) {
@@ -123,11 +124,11 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const logs = await invoke<string[]>(
-        "get_backward_channel_daemon_logs",
+        IPC.getBackwardChannelDaemonLogs,
         { lines },
       );
       set({ loading: false });
-      return logs;
+      return logs ?? [];
     } catch (e) {
       set({ error: String(e), loading: false });
       return [];
@@ -138,7 +139,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const info = await invoke<QueueInfo>(
-        "check_backward_channel_queue_health",
+        IPC.checkBackwardChannelQueueHealth,
       );
       set({ queueInfo: info, loading: false });
     } catch (e) {
@@ -150,7 +151,7 @@ export const useBackwardChannelStore = create<BackwardChannelStore>((set) => ({
     set({ loading: true, error: null });
     try {
       const ok = await invoke<boolean>(
-        "test_chat_platform_connection",
+        IPC.testChatPlatformConnection,
         { platform, config },
       );
       set({ loading: false });

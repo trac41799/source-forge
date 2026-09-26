@@ -10,7 +10,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 function renderCostAggregation() {
   mockInvoke.mockImplementation((cmd: string) => {
-    if (cmd === "get_cost_summary") {
+    if (cmd === "get_cost_summary_cmd") {
       return Promise.resolve({
         total_tokens_in: 0,
         total_tokens_out: 0,
@@ -122,6 +122,15 @@ describe("CostAggregation Page", () => {
     renderCostAggregation();
     await waitFor(() => {
       expect(screen.getByText(/WIP \/ Resumption/)).toBeInTheDocument();
+    });
+  });
+
+  it("loads summary via get_cost_summary_cmd (SPEC-001 §3.2)", async () => {
+    renderCostAggregation();
+    await waitFor(() => {
+      expect(mockInvoke).toHaveBeenCalledWith("get_cost_summary_cmd", {
+        projectId: null,
+      });
     });
   });
 });

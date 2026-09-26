@@ -703,35 +703,28 @@ pub struct FlywheelStats {
     pub contradictions_found: i64,
 }
 
-pub async fn run_compounder(
+/// Pass 1: build the compounder prompt for a session (local pre-pass only).
+/// Returns `None` when there are no candidates to compound.
+pub fn compounder_prepare_prompt(
+    db: &Connection,
+    session_id: &str,
+) -> Result<Option<String>, String> {
+    let candidates = pass1_local_prepass(db, session_id)?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(build_compounder_prompt(&candidates)))
+}
+
+/// Pass 2: merge an LLM response into the knowledge base — parse, dedupe by
+/// Jaccard similarity, weight confidence, and persist.
+pub fn compounder_merge(
     db: &Connection,
     session_id: &str,
     project_id: Option<&str>,
+    llm_content: &str,
 ) -> Result<Vec<KnowledgeItem>, String> {
-    let candidates = pass1_local_prepass(db, session_id)?;
-    if candidates.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let api_key = std::env::var("OPENROUTER_API_KEY").unwrap_or_default();
-    if api_key.is_empty() {
-        return Err("No OpenRouter API key configured".to_string());
-    }
-
-    let prompt = build_compounder_prompt(&candidates);
-    let request = crate::intelligence::OpenRouterRequest {
-        prompt,
-        model: None,
-        priority: crate::intelligence::Priority::Normal,
-        max_tokens: Some(2048),
-        temperature: Some(0.3),
-    };
-
-    let resp = crate::intelligence::invoke_with_backoff(request, &api_key, 3)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let parsed_items = parse_compounder_response(&resp.content);
+    let parsed_items = parse_compounder_response(llm_content);
     if parsed_items.is_empty() {
         return Ok(Vec::new());
     }
@@ -790,6 +783,14 @@ pub async fn run_compounder(
                 confidence: Some(new_conf),
                 status: None,
             };
+            // SPEC-001 §5 DG-3: re-runs upsert confidence AND bump the
+            // confirmation count (the weighted confidence above already
+            // treats it as evidence count).
+            db.execute(
+                "UPDATE knowledge_items SET confirmation_count = confirmation_count + 1 WHERE id = ?1",
+                rusqlite::params![matched.id],
+            )
+            .map_err(|e| e.to_string())?;
             let updated = update_knowledge_item(db, &matched.id, &updates)?;
             out.push(updated);
         } else {
@@ -813,6 +814,30 @@ pub async fn run_compounder(
     let _ = detect_and_record_contradictions(db, &out, &existing);
 
     Ok(out)
+}
+
+/// Library-level two-pass compounder over OpenRouter.
+///
+/// NOTE: this future is not `Send` — `&Connection` is held across the LLM
+/// await — so Tauri commands must compose `compounder_prepare_prompt` →
+/// `compounder_llm::complete` → `compounder_merge` instead (see
+/// `knowledge_commands.rs`).
+#[allow(dead_code)]
+pub async fn run_compounder(
+    db: &Connection,
+    session_id: &str,
+    project_id: Option<&str>,
+) -> Result<Vec<KnowledgeItem>, String> {
+    let prompt = match compounder_prepare_prompt(db, session_id)? {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let content = crate::compounder_llm::complete(
+        &crate::compounder_llm::LlmProvider::OpenRouter,
+        &prompt,
+    )
+    .await?;
+    compounder_merge(db, session_id, project_id, &content)
 }
 
 fn build_compounder_prompt(candidates: &[CompounderCandidate]) -> String {

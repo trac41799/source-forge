@@ -10,6 +10,8 @@ pub mod events;
 mod integrations;
 pub mod intelligence;
 pub mod knowledge;
+mod knowledge_commands;
+mod compounder_llm;
 pub mod orchestrator;
 mod playbook;
 mod pty;
@@ -233,6 +235,8 @@ pub fn run() {
             commands::search_knowledge_cmd,
             commands::get_knowledge_stats_cmd,
             commands::get_compounder_status_cmd,
+            knowledge_commands::run_compounder_cmd,
+            knowledge_commands::get_preflight_warnings_cmd,
             // Knowledge Graph Commands
             commands::kg_local_search_cmd,
             commands::kg_global_search_cmd,

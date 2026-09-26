@@ -15,6 +15,11 @@ export default defineConfig({
     setupFiles: ["./src/__tests__/setup.ts"],
     globals: true,
     css: true,
-    exclude: ["**/node_modules/**", "**/dist/**", "**/.worktrees/**", "**/.acc-test/**"],
+    exclude: [
+      "**/node_modules/**",
+      "**/dist/**",
+      ".worktrees/**",
+      ".acc-test/**",
+    ],
   },
 });
