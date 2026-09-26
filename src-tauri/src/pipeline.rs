@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use crate::deployer::{DeployOutcome, Deployer};
 use crate::pipeline_store::{self, StageLogEntry};
 use crate::stack_registry::{self, CliStatus};
-use crate::wave_executor::{WaveExecutionReport, WaveRunConfig};
+use crate::wave_executor::{AgentExecution, WaveExecutionReport, WaveRunConfig};
 
 pub const EVENT_NAME: &str = "build-app-progress";
 
@@ -81,6 +81,7 @@ pub struct PipelineOptions {
     pub base_branch: String,
     pub allow_deploy_on_failed_verification: bool,
     pub generate_dockerfile: bool,
+    pub agent_timeout_secs: u64,
 }
 
 impl Default for PipelineOptions {
@@ -95,6 +96,7 @@ impl Default for PipelineOptions {
             base_branch: "main".to_string(),
             allow_deploy_on_failed_verification: false,
             generate_dockerfile: true,
+            agent_timeout_secs: 300,
         }
     }
 }
@@ -160,6 +162,12 @@ pub trait WaveRunner: Send + Sync {
         plan_id: &str,
         base_repo: &str,
     ) -> Result<WaveExecutionReport, String>;
+
+    /// Kill/respawn control for the supervisor. `None` skips supervision
+    /// (used by hermetic test runners that write handoffs immediately).
+    fn control(&self) -> Option<&dyn crate::wave_supervisor::AgentControl> {
+        None
+    }
 }
 
 /// Production wave runner: adapter-based execution (mock/opencode adapters).
@@ -193,6 +201,36 @@ impl WaveRunner for AdapterWaveRunner {
             &self.registry,
         ))
     }
+
+    fn control(&self) -> Option<&dyn crate::wave_supervisor::AgentControl> {
+        Some(self)
+    }
+}
+
+impl crate::wave_supervisor::AgentControl for AdapterWaveRunner {
+    fn kill(&self, agent: &AgentExecution) -> Result<(), String> {
+        let adapter = self
+            .registry
+            .get(&self.agent_command)
+            .ok_or_else(|| format!("No adapter found for agent: {}", self.agent_command))?;
+        let session = crate::agent_adapters::AgentSession {
+            id: agent.session_id.clone(),
+            agent_id: self.agent_command.clone(),
+            worktree: agent.worktree_path.clone(),
+            started_at: chrono::Utc::now(),
+        };
+        adapter.kill(&session)
+    }
+
+    fn respawn(&self, agent: &AgentExecution) -> Result<String, String> {
+        let adapter = self
+            .registry
+            .get(&self.agent_command)
+            .ok_or_else(|| format!("No adapter found for agent: {}", self.agent_command))?;
+        // The task text lives in the worktree's guideline; the adapter only
+        // needs the reference for titling the new session.
+        Ok(adapter.spawn(&agent.agent_ref, &agent.worktree_path)?.id)
+    }
 }
 
 pub struct PipelineAdapters<'a> {
@@ -214,6 +252,7 @@ enum StageResult {
 #[derive(Default)]
 struct PipelineState {
     tasks: Vec<crate::spec_parser::SpecTask>,
+    run_id: String,
     project_path: String,
     project_id: String,
     stack_id: Option<String>,
@@ -238,6 +277,7 @@ pub fn run_pipeline(
         ..Default::default()
     };
     let mut state = PipelineState {
+        run_id: opts.run_id.clone(),
         project_path: opts.project_path.clone(),
         ..Default::default()
     };
@@ -404,7 +444,7 @@ fn run_stage(
         BuildStage::Provision => stage_provision(db, opts, adapters, state),
         BuildStage::Scaffold => stage_scaffold(opts, state),
         BuildStage::SeedPlan => stage_seed_plan(db, opts, state),
-        BuildStage::ExecuteWaves => stage_execute_waves(db, adapters, state),
+        BuildStage::ExecuteWaves => stage_execute_waves(db, opts, adapters, state),
         BuildStage::FinalizeAndVerify => stage_finalize_and_verify(db, adapters, state),
         BuildStage::Deploy => stage_deploy(opts, adapters, state),
         BuildStage::Report => Ok(StageResult::Done("report assembled".to_string())),
@@ -621,6 +661,7 @@ fn ensure_project_row(db: &Connection, project_id: &str, project_path: &str) -> 
 
 fn stage_execute_waves(
     db: &Mutex<Connection>,
+    opts: &PipelineOptions,
     adapters: &PipelineAdapters,
     state: &mut PipelineState,
 ) -> Result<StageResult, String> {
@@ -635,8 +676,40 @@ fn stage_execute_waves(
         .clone()
         .ok_or_else(|| "seed_plan must run before execute_waves".to_string())?;
 
-    let report = adapters.wave_runner.run(db, &plan_id, &state.project_path)?;
+    let mut report = adapters.wave_runner.run(db, &plan_id, &state.project_path)?;
     let agents = report.agents.len();
+
+    // Production path: supervise handoffs (deadline/retry/correction/cancel).
+    // Hermetic test runners return no control and skip this.
+    if let Some(control) = adapters.wave_runner.control() {
+        let config = crate::wave_supervisor::SupervisionConfig {
+            timeout: std::time::Duration::from_secs(opts.agent_timeout_secs.max(1)),
+            poll_interval: std::time::Duration::from_secs(2),
+            max_retries: 1,
+            cost_cap_usd: None,
+        };
+        let run_id = state.run_id.clone();
+        let cancel_check = || {
+            db.lock()
+                .ok()
+                .and_then(|conn| pipeline_store::is_cancelled(&conn, &run_id).ok())
+                .unwrap_or(false)
+        };
+        let outcome = crate::wave_supervisor::supervise_agents(
+            db,
+            &mut report,
+            &config,
+            control,
+            &cancel_check,
+        )?;
+        if outcome.cancelled {
+            state.wave_report = Some(report);
+            return Ok(StageResult::Done(
+                "cancellation requested during agent execution".to_string(),
+            ));
+        }
+    }
+
     state.wave_report = Some(report);
     Ok(StageResult::Done(format!("{agents} agents spawned")))
 }
@@ -783,7 +856,6 @@ fn stage_deploy(
 mod tests {
     use super::*;
     use crate::deployer::MockDeployer;
-    use crate::wave_executor::AgentExecution;
     use tempfile::TempDir;
 
     fn setup_db() -> Connection {
@@ -938,6 +1010,7 @@ mod tests {
                     status: "running".to_string(),
                     guideline_path: String::new(),
                     cost_usd: 0.0,
+                    retry_count: 0,
                 });
             }
 
@@ -965,6 +1038,7 @@ mod tests {
             base_branch: "main".to_string(),
             allow_deploy_on_failed_verification: false,
             generate_dockerfile: true,
+            agent_timeout_secs: 300,
         }
     }
 

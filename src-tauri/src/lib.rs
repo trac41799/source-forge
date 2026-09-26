@@ -16,6 +16,7 @@ mod pipeline_store;
 mod deployer;
 mod pipeline;
 mod pipeline_commands;
+mod wave_supervisor;
 pub mod orchestrator;
 mod playbook;
 mod pty;

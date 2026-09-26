@@ -33,6 +33,8 @@ pub struct AgentExecution {
     pub status: String, // "running" | "done" | "failed" | "killed"
     pub guideline_path: String,
     pub cost_usd: f64,
+    #[serde(default)]
+    pub retry_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -143,6 +145,7 @@ pub async fn execute_wave_real(
             status: "running".to_string(),
             guideline_path: _guideline_path.to_string_lossy().to_string(),
             cost_usd: 0.0,
+            retry_count: 0,
         });
     }
 
@@ -302,6 +305,7 @@ pub async fn execute_wave_with_adapters(
             status: "running".to_string(),
             guideline_path: guideline_path.to_string_lossy().to_string(),
             cost_usd: 0.0,
+            retry_count: 0,
         });
     }
 
@@ -368,6 +372,7 @@ async fn resume_wave_from_state(
                 status: "running".to_string(),
                 guideline_path: String::new(), // Would need to be persisted
                 cost_usd: agent_state.cost_usd,
+                retry_count: 0,
             });
         }
     }
@@ -442,6 +447,7 @@ mod tests {
             status: "running".to_string(),
             guideline_path: ".worktrees/plan-1-frontend/.acc/GUIDELINE.md".to_string(),
             cost_usd: 0.0,
+            retry_count: 0,
         };
         assert_eq!(ae.status, "running");
         assert!(ae.guideline_path.contains("GUIDELINE.md"));

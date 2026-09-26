@@ -42,6 +42,7 @@ pub struct BuildAppOptions {
     pub base_branch: Option<String>,
     pub allow_deploy_on_failed_verification: Option<bool>,
     pub generate_dockerfile: Option<bool>,
+    pub agent_timeout_secs: Option<u64>,
 }
 
 impl BuildAppOptions {
@@ -58,6 +59,7 @@ impl BuildAppOptions {
                 .allow_deploy_on_failed_verification
                 .unwrap_or(false),
             generate_dockerfile: self.generate_dockerfile.unwrap_or(true),
+            agent_timeout_secs: self.agent_timeout_secs.unwrap_or(300),
         }
     }
 }
@@ -147,6 +149,7 @@ pub async fn resume_build_app_cmd(
         base_branch: "main".to_string(),
         allow_deploy_on_failed_verification: false,
         generate_dockerfile: true,
+        agent_timeout_secs: 300,
     };
 
     run_on_blocking_thread(app, state.db.clone(), opts).await
