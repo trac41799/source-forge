@@ -135,7 +135,35 @@ fn build_agent_budget(row: &rusqlite::Row) -> rusqlite::Result<AgentBudget> {
 pub fn create_budget(db: &Connection, input: &BudgetInput) -> Result<AgentBudget, String> {
     let id = Uuid::new_v4().to_string();
     let now = Utc::now().to_rfc3339();
-    let budget_total = resolve_budget_total(input);
+
+    // M2 (spec R22): derive complexity via the decision layer when not supplied.
+    let mut complexity = input.task_complexity.clone();
+    if complexity.is_none() {
+        let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+        let key = std::env::var("OPENROUTER_API_KEY").ok();
+        if key.is_some() || cfg.backend == "local" {
+            let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+            let desc = format!(
+                "agent {} model {}",
+                input.agent_id,
+                input.model.as_deref().unwrap_or("unknown")
+            );
+            if let Ok(Some((c, _))) = crate::decision::choose_complexity(
+                &cfg,
+                &transport,
+                key.as_deref(),
+                &desc,
+                Some(db),
+            ) {
+                complexity = Some(c);
+            }
+        }
+    }
+    let effective = BudgetInput {
+        task_complexity: complexity.clone(),
+        ..input.clone()
+    };
+    let budget_total = resolve_budget_total(&effective);
 
     db.execute(
         "INSERT INTO agent_budgets (id, session_id, plan_agent_id, agent_id, task_complexity, model, budget_total, budget_used, state, wip_path, created_at, updated_at)
@@ -145,7 +173,7 @@ pub fn create_budget(db: &Connection, input: &BudgetInput) -> Result<AgentBudget
             input.session_id,
             input.plan_agent_id,
             input.agent_id,
-            input.task_complexity,
+            complexity,
             input.model,
             budget_total,
             now,
@@ -159,7 +187,7 @@ pub fn create_budget(db: &Connection, input: &BudgetInput) -> Result<AgentBudget
         session_id: input.session_id.clone(),
         plan_agent_id: input.plan_agent_id.clone(),
         agent_id: input.agent_id.clone(),
-        task_complexity: input.task_complexity.clone(),
+        task_complexity: complexity.clone(),
         model: input.model.clone(),
         budget_total,
         budget_used: 0,

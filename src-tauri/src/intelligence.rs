@@ -620,6 +620,59 @@ pub fn suggest_outcome(pty_output: &str, idle_seconds: u64) -> Option<String> {
     None
 }
 
+/// M2 (spec R21): classify the session outcome via the decision layer, falling
+/// back to the keyword heuristic when the backend is unavailable.
+pub fn suggest_outcome_decision(
+    db: &Connection,
+    pty_output: &str,
+    idle_seconds: u64,
+) -> Option<String> {
+    let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    if key.is_some() || cfg.backend == "local" {
+        let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+        let tail = extract_pty_context(pty_output, 200);
+        if let Ok(Some((label, _))) =
+            crate::decision::classify_outcome(&cfg, &transport, key.as_deref(), &tail, Some(db))
+        {
+            return Some(label);
+        }
+    }
+    suggest_outcome(pty_output, idle_seconds)
+}
+
+/// M2 (spec R23): confidence that a suggested fix addresses the root cause,
+/// via a `noul`. Falls back to 0.0 (prior behaviour) when unavailable.
+pub fn failure_confidence_decision(
+    db: &Connection,
+    diagnosis: &str,
+    root_cause: &str,
+    suggested_fix: &str,
+) -> f64 {
+    let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    if key.is_some() || cfg.backend == "local" {
+        let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+        let state = serde_json::json!({
+            "diagnosis": diagnosis,
+            "root_cause": root_cause,
+            "suggested_fix": suggested_fix,
+        });
+        if let Ok(Some(p)) = crate::decision::judge(
+            &cfg,
+            &transport,
+            key.as_deref(),
+            &state,
+            "Does `suggested_fix` address `root_cause`?",
+            "addresses",
+            Some(db),
+        ) {
+            return p;
+        }
+    }
+    0.0
+}
+
 // ============================================================================
 // GAP 3: Intelligence subagent pattern detection
 // ============================================================================

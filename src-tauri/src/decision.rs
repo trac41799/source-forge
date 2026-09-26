@@ -595,6 +595,199 @@ pub fn dispatch_mode(
     }
 }
 
+// ============================================================================
+// Reusable classification helpers (M1+ consumers)
+// ============================================================================
+
+pub const COMPOUNDER_CATEGORIES: &[&str] = &[
+    "pattern", "antipattern", "convention", "tooling", "insight", "fact", "handoff", "correction",
+];
+pub const KG_ENTITY_TYPES: &[&str] = &["file", "function", "pattern", "error", "decision", "library"];
+pub const KG_RELATION_TYPES: &[&str] =
+    &["caused_by", "fixed_by", "extends", "requires", "contradicts", "similar_to"];
+pub const OUTCOMES: &[&str] = &["done", "failed", "revised", "stalled"];
+pub const COMPLEXITIES: &[&str] = &["low", "medium", "high"];
+
+fn criteria_from(labels: &[&str]) -> BTreeMap<String, String> {
+    labels.iter().map(|l| ((*l).to_string(), String::new())).collect()
+}
+
+/// Ask a `choice` question; returns `(selected_label, confidence)` or `None` if absent.
+pub fn choose(
+    cfg: &DecisionConfig,
+    transport: &dyn DecisionTransport,
+    api_key: Option<&str>,
+    state: &serde_json::Value,
+    instructions: &str,
+    criteria: &BTreeMap<String, String>,
+    question_id: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    let mut questions = serde_json::Map::new();
+    questions.insert(
+        question_id.to_string(),
+        serde_json::json!({ "type": "choice", "instructions": instructions, "criteria": criteria }),
+    );
+    let res = decision_request(
+        cfg,
+        transport,
+        api_key,
+        state,
+        &serde_json::Value::Object(questions),
+        2,
+        conn,
+    )?;
+    Ok(res
+        .answers
+        .get(question_id)
+        .and_then(|a| a.value.as_str().map(|s| (s.to_string(), a.confidence))))
+}
+
+/// Ask a `noul`; returns the yes-probability or `None` if the question is absent.
+pub fn judge(
+    cfg: &DecisionConfig,
+    transport: &dyn DecisionTransport,
+    api_key: Option<&str>,
+    state: &serde_json::Value,
+    instructions: &str,
+    question_id: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<f64>, DecisionError> {
+    let mut questions = serde_json::Map::new();
+    questions.insert(
+        question_id.to_string(),
+        serde_json::json!({ "type": "noul", "instructions": instructions }),
+    );
+    let res = decision_request(
+        cfg,
+        transport,
+        api_key,
+        state,
+        &serde_json::Value::Object(questions),
+        2,
+        conn,
+    )?;
+    Ok(res.answers.get(question_id).and_then(|a| a.value.as_f64()))
+}
+
+pub fn choose_category(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    content: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(content),
+        "Which category best describes this coding knowledge item?",
+        &criteria_from(COMPOUNDER_CATEGORIES),
+        "category",
+        conn,
+    )
+}
+
+pub fn classify_outcome(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    pty_tail: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(pty_tail),
+        "What is the final outcome of this coding session?",
+        &criteria_from(OUTCOMES),
+        "outcome",
+        conn,
+    )
+}
+
+pub fn choose_complexity(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    task_desc: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(task_desc),
+        "How complex is this software task?",
+        &criteria_from(COMPLEXITIES),
+        "complexity",
+        conn,
+    )
+}
+
+pub fn choose_entity_type(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    description: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(description),
+        "What kind of code entity is this?",
+        &criteria_from(KG_ENTITY_TYPES),
+        "entity_type",
+        conn,
+    )
+}
+
+pub fn choose_relation_type(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    description: &str,
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(description),
+        "How are these two code entities related?",
+        &criteria_from(KG_RELATION_TYPES),
+        "relation_type",
+        conn,
+    )
+}
+
+/// Pick the best agent for a task from `agents` (spec R20).
+pub fn choose_agent(
+    cfg: &DecisionConfig,
+    t: &dyn DecisionTransport,
+    key: Option<&str>,
+    task_desc: &str,
+    agents: &[String],
+    conn: Option<&Connection>,
+) -> Result<Option<(String, f64)>, DecisionError> {
+    let criteria: BTreeMap<String, String> =
+        agents.iter().map(|a| (a.clone(), String::new())).collect();
+    choose(
+        cfg,
+        t,
+        key,
+        &serde_json::json!(task_desc),
+        "Which agent is best suited to this software task?",
+        &criteria,
+        "agent",
+        conn,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -993,5 +1186,41 @@ mod tests {
         cfg.review_threshold = 0.9;
         cfg.accept_threshold = 0.5;
         assert!(set_decision_config(&conn, &cfg).is_err());
+    }
+
+    // ── M1 helpers ──────────────────────────────────────────────────────
+    #[test]
+    fn choose_category_and_judge_use_decision() {
+        use std::sync::atomic::AtomicU32;
+        let cfg = DecisionConfig::default();
+
+        let cat_payload = serde_json::json!({
+            "model": "m",
+            "answers": { "category": { "type": "choice", "choice": "pattern",
+                                       "probabilities": {"pattern": 1.0}, "confidence": 0.9 } },
+            "usage": { "input_tokens": 1, "cost": 0.0 }
+        });
+        let t = MockTransport { calls: AtomicU32::new(0), fail: false, payload: cat_payload };
+        let got = choose_category(&cfg, &t, None, "always run tests first", None).unwrap();
+        assert_eq!(got, Some(("pattern".to_string(), 0.9)));
+
+        let noul_payload = serde_json::json!({
+            "model": "m",
+            "answers": { "ok": { "type": "noul", "noul": 0.7 } },
+            "usage": { "input_tokens": 1, "cost": 0.0 }
+        });
+        let t2 = MockTransport { calls: AtomicU32::new(0), fail: false, payload: noul_payload };
+        let v = judge(&cfg, &t2, None, &serde_json::json!("x"), "is it ok?", "ok", None).unwrap();
+        assert_eq!(v, Some(0.7));
+    }
+
+    #[test]
+    fn classification_helper_labels_are_offered() {
+        // Sanity: the criteria maps are non-empty and contain the labels we expect.
+        assert!(criteria_from(COMPOUNDER_CATEGORIES).contains_key("pattern"));
+        assert!(criteria_from(KG_ENTITY_TYPES).contains_key("function"));
+        assert!(criteria_from(KG_RELATION_TYPES).contains_key("contradicts"));
+        assert!(criteria_from(OUTCOMES).contains_key("stalled"));
+        assert!(criteria_from(COMPLEXITIES).contains_key("medium"));
     }
 }
