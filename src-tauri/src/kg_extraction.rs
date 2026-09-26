@@ -108,9 +108,42 @@ pub fn persist_extraction(
     let mut entity_count = 0usize;
     let mut rel_count = 0usize;
 
+    // M1 (spec R12): type entities/relations via the decision layer; the LLM
+    // types remain the fallback when the backend is unavailable (ADR 0002).
+    let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
+    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
+    let backend_ready = dec_key.is_some() || dec_cfg.backend == "local";
+
     for entity in &result.entities {
+        let describe = format!("{}: {}", entity.name, entity.description);
+
+        let mut etype = entity.r#type.clone();
+        if let Ok(Some((t, _))) =
+            crate::decision::choose_entity_type(&dec_cfg, &dec_transport, dec_key.as_deref(), &describe, Some(db))
+        {
+            etype = t;
+        }
+
+        // Gate: skip entities the model judges not to be real reusable knowledge.
+        if backend_ready {
+            if let Ok(Some(p)) = crate::decision::judge(
+                &dec_cfg,
+                &dec_transport,
+                dec_key.as_deref(),
+                &serde_json::json!(describe),
+                "Is this a real, reusable code entity worth storing as knowledge?",
+                "real",
+                Some(db),
+            ) {
+                if p < dec_cfg.review_threshold {
+                    continue;
+                }
+            }
+        }
+
         let item = KnowledgeItemInput {
-            r#type: entity.r#type.clone(),
+            r#type: etype,
             title: entity.name.clone(),
             content: entity.description.clone(),
             tags: None,
@@ -138,8 +171,19 @@ pub fn persist_extraction(
             5,
         ).unwrap_or_default();
 
+        let mut rtype = rel.relation_type.clone();
+        if let Ok(Some((t, _))) = crate::decision::choose_relation_type(
+            &dec_cfg,
+            &dec_transport,
+            dec_key.as_deref(),
+            &format!("{} → {}: {}", rel.source, rel.target, rel.evidence),
+            Some(db),
+        ) {
+            rtype = t;
+        }
+
         if let (Some(from), Some(to)) = (from_items.first(), to_items.first()) {
-            if add_knowledge_relation(db, &from.id, &to.id, &rel.relation_type).is_ok() {
+            if add_knowledge_relation(db, &from.id, &to.id, &rtype).is_ok() {
                 rel_count += 1;
             }
         }

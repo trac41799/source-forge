@@ -111,6 +111,30 @@ pub fn route_task(db: &Connection, task_desc: &str, task_type: &str, project_id:
     }
 
     let _ = project_id;
+
+    // M2 (spec R20): re-rank by decision-derived confidence when a backend is available.
+    let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    if (key.is_some() || cfg.backend == "local") && result.len() >= 2 {
+        let agents: Vec<String> = result.iter().map(|s| s.agent_id.clone()).collect();
+        let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+        if let Ok(Some((best, conf))) = crate::decision::choose_agent(
+            &cfg,
+            &transport,
+            key.as_deref(),
+            task_desc,
+            &agents,
+            Some(db),
+        ) {
+            if let Some(pos) = result.iter().position(|s| s.agent_id == best) {
+                let mut chosen = result.remove(pos);
+                chosen.confidence = conf;
+                chosen.reasoning = format!("decision-layer pick (confidence {conf:.2})");
+                result.insert(0, chosen);
+            }
+        }
+    }
+
     Ok(result)
 }
 

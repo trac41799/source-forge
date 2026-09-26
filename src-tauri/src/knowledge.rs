@@ -715,6 +715,12 @@ pub async fn run_compounder(
         return Ok(Vec::new());
     }
 
+    // M1 (spec R11): re-tag categories via the decision layer; the LLM category
+    // remains the fallback when the backend is unavailable (ADR 0002).
+    let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
+    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
+
     let existing_query = KnowledgeQuery {
         q: None,
         stack: None,
@@ -730,7 +736,16 @@ pub async fn run_compounder(
     let existing = get_knowledge_items(db, &existing_query)?;
 
     let mut out: Vec<KnowledgeItem> = Vec::new();
-    for cand in parsed_items {
+    for mut cand in parsed_items {
+        if let Ok(Some((cat, _))) = crate::decision::choose_category(
+            &dec_cfg,
+            &dec_transport,
+            dec_key.as_deref(),
+            &cand.content,
+            Some(db),
+        ) {
+            cand.category = cat;
+        }
         if let Some(matched) = find_jaccard_match(&cand, &existing, 0.7) {
             let new_conf = weighted_confidence(
                 matched.confidence,

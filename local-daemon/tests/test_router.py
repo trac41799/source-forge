@@ -1,4 +1,9 @@
-from router import build_router_prompt, parse_router_response
+from router import (
+    build_router_prompt,
+    build_router_questions,
+    parse_decision_response,
+    parse_router_response,
+)
 
 
 class TestBuildRouterPrompt:
@@ -74,3 +79,32 @@ class TestParseRouterResponse:
     def test_only_punctuation_returns_none(self):
         result = parse_router_response(".")
         assert result is None
+
+
+class TestDecisionRouting:
+    def test_build_router_questions_offers_agents_and_none(self):
+        agents = [{"id": "a", "description": "A"}, {"id": "b", "display_name": "B"}]
+        q = build_router_questions(agents)["agent"]
+        assert q["type"] == "choice"
+        assert set(q["criteria"]) == {"a", "b", "none"}
+
+    def test_build_router_questions_skips_empty_ids(self):
+        agents = [{"id": "", "description": "x"}, {"id": "b", "description": "B"}]
+        q = build_router_questions(agents)["agent"]
+        assert set(q["criteria"]) == {"b", "none"}
+
+    def test_parse_decision_choice(self):
+        payload = {"answers": {"agent": {"type": "choice", "choice": "b", "confidence": 0.91}}}
+        assert parse_decision_response(payload) == ("b", 0.91)
+
+    def test_parse_decision_none_option(self):
+        payload = {"answers": {"agent": {"type": "choice", "choice": "none", "confidence": 0.4}}}
+        assert parse_decision_response(payload) == (None, 0.4)
+
+    def test_parse_decision_malformed_returns_none(self):
+        assert parse_decision_response({}) is None
+        assert parse_decision_response({"answers": {}}) is None
+        assert (
+            parse_decision_response({"answers": {"agent": {"type": "noul", "noul": 0.5}}})
+            is None
+        )

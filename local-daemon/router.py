@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import re
 from typing import Optional
 
@@ -61,6 +62,84 @@ def parse_router_response(response: str) -> Optional[str]:
     return None
 
 
+# ── Decision layer (spec R10) ─────────────────────────────────────────────
+DECISION_BASE_DEFAULT = "https://openrouter.ai/api"
+DECISION_MODEL_DEFAULT = "typesafe/jev-1.13"
+
+
+def build_router_questions(agents: list[dict]) -> dict:
+    """A `choice` question over the configured agent ids plus a `none` option."""
+    criteria: dict = {}
+    for agent in agents:
+        agent_id = agent.get("id", "")
+        if not agent_id:
+            continue
+        criteria[agent_id] = (
+            agent.get("description") or agent.get("display_name") or agent_id
+        )
+    criteria["none"] = "No available agent should handle this message"
+    return {
+        "agent": {
+            "type": "choice",
+            "instructions": "Which agent should handle this message?",
+            "criteria": criteria,
+        }
+    }
+
+
+def parse_decision_response(payload: dict):
+    """Return (agent_id_or_None, confidence) from a /v1/systemone response.
+
+    Returns None when the response is malformed/absent (caller falls back).
+    A tuple with agent_id None means the model chose "none".
+    """
+    answers = payload.get("answers") or {}
+    ans = answers.get("agent") or {}
+    if ans.get("type") != "choice":
+        return None
+    choice = ans.get("choice")
+    if not choice:
+        return None
+    confidence = float(ans.get("confidence", 0.0))
+    return (None if choice == "none" else choice, confidence)
+
+
+async def route_with_decision(payload, project: dict):
+    """Route via the decision endpoint. Returns (agent_id|None, confidence) or None on failure."""
+    import httpx  # local import: tests need not have httpx installed
+
+    agents = project.get("agents", [])
+    if not agents:
+        return None
+
+    base = os.environ.get("DECISION_BASE_URL", DECISION_BASE_DEFAULT).rstrip("/")
+    key = os.environ.get("OPENROUTER_API_KEY", "")
+    is_local = "127.0.0.1" in base or "localhost" in base
+    if not key and not is_local:
+        return None
+
+    body = {
+        "model": os.environ.get("DECISION_MODEL", DECISION_MODEL_DEFAULT),
+        "state": {
+            "message": payload.text,
+            "sender": payload.sender_name,
+            "platform": payload.platform,
+        },
+        "questions": build_router_questions(agents),
+    }
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(f"{base}/v1/systemone", json=body, headers=headers)
+            resp.raise_for_status()
+            return parse_decision_response(resp.json())
+    except Exception as e:
+        logger.error("Decision router failed: %s", e)
+        return None
+
+
 async def route(
     payload,  # StandardContextPayload
     project: dict,
@@ -70,6 +149,13 @@ async def route(
     agents = project.get("agents", [])
     if not agents:
         return None
+
+    # M1 (spec R10): decide via the decision layer; fall back to prompt+parse.
+    decision = await route_with_decision(payload, project)
+    if decision is not None:
+        agent_id, confidence = decision
+        logger.info("Router (decision) → agent_id=%s conf=%.2f", agent_id, confidence)
+        return agent_id
 
     prompt = build_router_prompt(
         platform=payload.platform,
