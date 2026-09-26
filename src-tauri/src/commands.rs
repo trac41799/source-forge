@@ -691,9 +691,18 @@ pub async fn seed_wave_from_spec_cmd(
 #[tauri::command]
 pub async fn verify_project_cmd(
     project_path: String,
+    state: State<'_, AppState>,
 ) -> Result<crate::verification::VerificationReport, String> {
     use std::path::Path;
-    Ok(crate::verification::verify_project(Path::new(&project_path)))
+    let p = Path::new(&project_path);
+    let mut report = crate::verification::verify_project(p);
+    // M3 (spec R31): additive semantic checks when a decision backend is configured.
+    let readme = std::fs::read_to_string(p.join("README.md")).ok();
+    if let Ok(db) = state.db.lock() {
+        let semantic = crate::verification::semantic_checks(&db, readme.as_deref(), "");
+        report.extend_with(semantic);
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -757,6 +766,75 @@ pub async fn get_preferences_cmd(
 ) -> Result<crate::preferences::UserPreferences, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     crate::preferences::get_preferences(&db)
+}
+
+// ── Decision layer (spec 001, M5 backend) ─────────────────────────────────
+#[tauri::command]
+pub async fn get_decision_config_cmd(
+    state: State<'_, AppState>,
+) -> Result<crate::decision::DecisionConfig, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::decision::get_decision_config(&db)
+}
+
+#[tauri::command]
+pub async fn set_decision_config_cmd(
+    config: crate::decision::DecisionConfig,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    crate::decision::set_decision_config(&db, &config)
+}
+
+#[tauri::command]
+pub async fn decision_health_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let cfg = crate::decision::get_decision_config(&db)?;
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+    Ok(crate::decision::health_probe(&cfg, &transport, key.as_deref()).to_string())
+}
+
+#[tauri::command]
+pub async fn list_decision_reviews_cmd(
+    state: State<'_, AppState>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    let mut stmt = db
+        .prepare(
+            "SELECT id, consumer, question, decided_value, confidence, resolved, created_at
+             FROM decision_reviews ORDER BY created_at DESC LIMIT 200",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok(serde_json::json!({
+                "id": r.get::<_, String>(0)?,
+                "consumer": r.get::<_, String>(1)?,
+                "question": r.get::<_, Option<String>>(2)?,
+                "decided_value": r.get::<_, Option<String>>(3)?,
+                "confidence": r.get::<_, Option<f64>>(4)?,
+                "resolved": r.get::<_, i64>(5)? != 0,
+                "created_at": r.get::<_, String>(6)?,
+            }))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows.filter_map(|r| r.ok()).collect())
+}
+
+#[tauri::command]
+pub async fn resolve_decision_review_cmd(
+    id: String,
+    resolution: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    db.execute(
+        "UPDATE decision_reviews SET resolved = 1, resolution = ?1, resolved_at = datetime('now') WHERE id = ?2",
+        rusqlite::params![resolution, id],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

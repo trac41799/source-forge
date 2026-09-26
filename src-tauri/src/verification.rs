@@ -63,6 +63,79 @@ impl VerificationReport {
         self.total += 1;
         self.checks.push(check);
     }
+
+    /// M3 (spec R31): append additive semantic checks without disturbing the
+    /// deterministic checks already recorded.
+    pub fn extend_with(&mut self, checks: Vec<BuildCheck>) {
+        for check in checks {
+            self.add(check);
+        }
+    }
+}
+
+/// M3 (spec R31): additive semantic checks via the decision layer. Returns an
+/// empty vec when no backend is configured (deterministic checks are unaffected).
+pub fn semantic_checks(
+    db: &rusqlite::Connection,
+    readme: Option<&str>,
+    wave_diff: &str,
+) -> Vec<BuildCheck> {
+    let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    if key.is_none() && cfg.backend != "local" {
+        return Vec::new();
+    }
+    let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+    let mut out = Vec::new();
+
+    if let Some(rd) = readme {
+        if let Ok(Some(p)) = crate::decision::judge(
+            &cfg,
+            &transport,
+            key.as_deref(),
+            &serde_json::json!(rd),
+            "Does this README explain how to set up and run the project?",
+            "explains",
+            Some(db),
+        ) {
+            out.push(BuildCheck {
+                name: "README explains setup (semantic)".into(),
+                status: if p >= cfg.accept_threshold {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Fail(format!(
+                        "semantic confidence {p:.2} < accept {:.2}",
+                        cfg.accept_threshold
+                    ))
+                },
+                detail: format!("confidence {p:.2}"),
+            });
+        }
+    }
+
+    if !wave_diff.is_empty() {
+        if let Ok(Some(p)) = crate::decision::judge(
+            &cfg,
+            &transport,
+            key.as_deref(),
+            &serde_json::json!({ "diff": wave_diff }),
+            "Does this diff introduce hardcoded secrets or credentials?",
+            "has_secrets",
+            Some(db),
+        ) {
+            out.push(BuildCheck {
+                name: "No secrets in diff (semantic)".into(),
+                status: if p < cfg.review_threshold {
+                    CheckStatus::Pass
+                } else {
+                    CheckStatus::Fail(format!("secret exposure confidence {p:.2}"))
+                },
+                detail: format!("has_secrets confidence {p:.2}"),
+            });
+        }
+    }
+
+    out
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
