@@ -9,6 +9,7 @@ use std::fs;
 use std::path::Path;
 
 use crate::orchestrator;
+use rusqlite::Connection;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct HandoffEnvelope {
@@ -105,6 +106,35 @@ pub fn agent_ref_from_filename(path: &Path) -> Option<String> {
     }
     let stem = name.strip_prefix("HANDOFF_")?.strip_suffix(".md")?;
     Some(stem.to_string())
+}
+
+/// M3 (spec R30): semantic handoff confidence in [0,1] via a `noul`, or `None`
+/// when no backend is configured. Callers route review-band results to the
+/// `decision_reviews` queue.
+pub fn semantic_handoff_confidence(db: &Connection, env: &HandoffEnvelope) -> Option<f64> {
+    let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let key = std::env::var("OPENROUTER_API_KEY").ok();
+    if key.is_none() && cfg.backend != "local" {
+        return None;
+    }
+    let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+    let state = serde_json::json!({
+        "original_task": env.original_task,
+        "output_summary": env.output_summary,
+        "changed_files": env.changed_files,
+        "handoff_instruction": env.handoff_instruction,
+    });
+    crate::decision::judge(
+        &cfg,
+        &transport,
+        key.as_deref(),
+        &state,
+        "Does `output_summary` plausibly complete `original_task`, and is `handoff_instruction` actionable for the next agent?",
+        "ok",
+        Some(db),
+    )
+    .ok()
+    .flatten()
 }
 
 #[cfg(test)]
