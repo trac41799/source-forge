@@ -35,6 +35,13 @@ export const IPC = {
   cancelBuildApp: "cancel_build_app_cmd",
   getBuildAppStatus: "get_build_app_status_cmd",
 
+  // Decision layer
+  getDecisionConfig: "get_decision_config_cmd",
+  setDecisionConfig: "set_decision_config_cmd",
+  decisionHealth: "decision_health_cmd",
+  listDecisionReviews: "list_decision_reviews_cmd",
+  resolveDecisionReview: "resolve_decision_review_cmd",
+
   // Backward channel (chat platforms + daemon)
   getChatPlatformConfigs: "get_chat_platform_configs_cmd",
   saveChatPlatformConfig: "save_chat_platform_config_cmd",

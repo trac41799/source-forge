@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+﻿import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { IPC } from "@/lib/ipc/commands";
 
 export interface DecisionConfig {
   backend: string;
@@ -25,16 +26,16 @@ interface DecisionReview {
  */
 export function DecisionPanel() {
   const [config, setConfig] = useState<DecisionConfig | null>(null);
-  const [health, setHealth] = useState("…");
+  const [health, setHealth] = useState("â€¦");
   const [reviews, setReviews] = useState<DecisionReview[]>([]);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
       try {
-        setConfig(await invoke<DecisionConfig>("get_decision_config_cmd"));
-        setHealth(await invoke<string>("decision_health_cmd"));
-        setReviews(await invoke<DecisionReview[]>("list_decision_reviews_cmd"));
+        setConfig(await invoke<DecisionConfig>(IPC.getDecisionConfig));
+        setHealth(await invoke<string>(IPC.decisionHealth));
+        setReviews(await invoke<DecisionReview[]>(IPC.listDecisionReviews));
       } catch (e) {
         setError(String(e));
       }
@@ -44,8 +45,8 @@ export function DecisionPanel() {
   const save = async () => {
     if (!config) return;
     try {
-      await invoke("set_decision_config_cmd", { config });
-      setHealth(await invoke<string>("decision_health_cmd"));
+      await invoke(IPC.setDecisionConfig, { config });
+      setHealth(await invoke<string>(IPC.decisionHealth));
       setError(null);
     } catch (e) {
       setError(String(e));
@@ -54,8 +55,8 @@ export function DecisionPanel() {
 
   const resolve = async (id: string) => {
     try {
-      await invoke("resolve_decision_review_cmd", { id, resolution: "reviewed" });
-      setReviews(await invoke<DecisionReview[]>("list_decision_reviews_cmd"));
+      await invoke(IPC.resolveDecisionReview, { id, resolution: "reviewed" });
+      setReviews(await invoke<DecisionReview[]>(IPC.listDecisionReviews));
     } catch (e) {
       setError(String(e));
     }
@@ -69,7 +70,7 @@ export function DecisionPanel() {
     );
   }
   if (!config) {
-    return <div className="text-xs text-muted-foreground">Loading decision layer…</div>;
+    return <div className="text-xs text-muted-foreground">Loading decision layerâ€¦</div>;
   }
 
   return (
@@ -119,8 +120,8 @@ export function DecisionPanel() {
           {reviews.map((r) => (
             <li key={r.id} className="flex items-center justify-between gap-2">
               <span>
-                {r.consumer}: {r.decided_value ?? "—"} (
-                {r.confidence != null ? r.confidence.toFixed(2) : "—"})
+                {r.consumer}: {r.decided_value ?? "â€”"} (
+                {r.confidence != null ? r.confidence.toFixed(2) : "â€”"})
               </span>
               {!r.resolved && (
                 <button onClick={() => resolve(r.id)} className="text-[10px] underline">
@@ -134,3 +135,4 @@ export function DecisionPanel() {
     </div>
   );
 }
+
