@@ -42,6 +42,9 @@ export const IPC = {
   listDecisionReviews: "list_decision_reviews_cmd",
   resolveDecisionReview: "resolve_decision_review_cmd",
 
+  // Skills / project
+  checkSkillbridge: "check_skillbridge",
+
   // Backward channel (chat platforms + daemon)
   getChatPlatformConfigs: "get_chat_platform_configs_cmd",
   saveChatPlatformConfig: "save_chat_platform_config_cmd",

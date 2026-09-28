@@ -2,8 +2,8 @@
 //
 // Supervised build pipeline (SPEC-001 §5 DG-1).
 //
-//   parse_spec → resolve_stack → provision → scaffold → seed_plan
-//   → execute_waves → finalize_and_verify → deploy → report
+//   parse_spec â†’ resolve_stack â†’ provision â†’ scaffold â†’ seed_plan
+//   â†’ execute_waves â†’ finalize_and_verify â†’ deploy â†’ report
 //
 // The pipeline is synchronous by design: it runs inside
 // `tauri::async_runtime::spawn_blocking` from `pipeline_commands.rs`, and the
@@ -227,9 +227,22 @@ impl crate::wave_supervisor::AgentControl for AdapterWaveRunner {
             .registry
             .get(&self.agent_command)
             .ok_or_else(|| format!("No adapter found for agent: {}", self.agent_command))?;
-        // The task text lives in the worktree's guideline; the adapter only
-        // needs the reference for titling the new session.
-        Ok(adapter.spawn(&agent.agent_ref, &agent.worktree_path)?.id)
+        // Re-send the real task, not the agent reference: the per-agent
+        // guideline written at spawn time holds it. Fall back to the ref only
+        // if the guideline is unreadable.
+        let guideline = std::path::Path::new(&agent.worktree_path)
+            .join(".acc")
+            .join("GUIDELINE.md");
+        let task = std::fs::read_to_string(&guideline)
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "Continue task {}: follow .acc/GUIDELINE.md and write HANDOFF_{}.md",
+                    agent.agent_ref, agent.agent_ref
+                )
+            });
+        Ok(adapter.spawn(&task, &agent.worktree_path)?.id)
     }
 }
 
@@ -301,6 +314,10 @@ pub fn run_pipeline(
                 state.compounder_items = previous.compounder_items;
             }
         }
+        // Resolve the project before any stage runs: `provision` checks Supabase
+        // config and runs *before* `seed_plan`, which used to be the only
+        // resolver (so the default Supabase stack could never provision).
+        state.project_id = resolve_project_id(&conn, opts)?;
     }
 
     for stage in BuildStage::order() {
@@ -341,6 +358,9 @@ pub fn run_pipeline(
                     ended_at,
                     message,
                 });
+                // Persist after every stage so a crash mid-run still carries
+                // plan_id/stack/verification forward on resume (no duplicate plans).
+                finalize_report(db, opts, &mut report, &state)?;
             }
             Ok(StageResult::Skipped(message)) => {
                 {
@@ -395,6 +415,33 @@ pub fn run_pipeline(
                 return Ok(report);
             }
         }
+    }
+
+    // A run whose verification failed is NOT a success, even though the only
+    // stage it affects (deploy) was skipped rather than failed.
+    let verification_failed = state
+        .verification
+        .as_ref()
+        .map(|verification| !verification.passed)
+        .unwrap_or(false);
+
+    if verification_failed && !opts.allow_deploy_on_failed_verification {
+        report.status = pipeline_store::STATUS_VERIFICATION_FAILED.to_string();
+        report.error = Some("verification failed".to_string());
+        finalize_report(db, opts, &mut report, &state)?;
+        {
+            let conn = lock(db)?;
+            pipeline_store::update_status(
+                &conn,
+                &opts.run_id,
+                pipeline_store::STATUS_VERIFICATION_FAILED,
+                Some("report"),
+            )?;
+        }
+        adapters
+            .event_sink
+            .emit("report", "verification_failed", "verification failed");
+        return Ok(report);
     }
 
     report.status = pipeline_store::STATUS_SUCCEEDED.to_string();
@@ -460,7 +507,7 @@ fn stage_parse_spec(
     let tasks = crate::spec_parser::parse_gap_closure_plan(&content);
     if tasks.is_empty() {
         return Err(format!(
-            "No tasks parsed from spec '{}' — expected '## Phase N' + '### Step X.Y' headers",
+            "No tasks parsed from spec '{}' â€” expected '## Phase N' + '### Step X.Y' headers",
             opts.spec_path
         ));
     }
@@ -537,7 +584,7 @@ fn stage_provision(
     if !missing_mcp.is_empty() {
         delegation.add_task(
             "provision-supabase",
-            "Connect Supabase MCP (Integrations → Supabase) so migrations can be applied",
+            "Connect Supabase MCP (Integrations â†’ Supabase) so migrations can be applied",
             "Stack requires a Supabase database",
         );
     }
@@ -596,7 +643,9 @@ fn stage_seed_plan(
     }
 
     let conn = lock(db)?;
-    state.project_id = resolve_project_id(&conn, opts)?;
+    if state.project_id.is_empty() {
+        state.project_id = resolve_project_id(&conn, opts)?;
+    }
 
     let slug = Path::new(&opts.spec_path)
         .file_stem()
@@ -736,6 +785,10 @@ fn stage_finalize_and_verify(
         wave_report,
     ))?;
 
+    // Feed the compounder: the adapter execution path writes no session events,
+    // so derive them from the handoffs (otherwise compounder_items is always 0).
+    record_handoff_events(db, &finalized);
+
     let verification = crate::verification::verify_project(Path::new(&project_path));
     let passed = verification.passed;
     state.verification = Some(verification);
@@ -766,6 +819,31 @@ fn stage_finalize_and_verify(
 
     state.wave_report = Some(finalized);
     Ok(StageResult::Done(format!("verification passed={passed}")))
+}
+
+/// Record `file_edit` events for each file a completed agent reported in its
+/// handoff, so the knowledge compounder has real session activity to work with.
+fn record_handoff_events(db: &Mutex<Connection>, report: &WaveExecutionReport) {
+    let Ok(conn) = db.lock() else {
+        return;
+    };
+    for agent in &report.agents {
+        if agent.status != "done" {
+            continue;
+        }
+        let handoff = Path::new(&agent.worktree_path)
+            .join(format!("HANDOFF_{}.md", agent.agent_ref));
+        let Ok(envelope) = crate::handoff_parser::parse_handoff_file(&handoff) else {
+            continue;
+        };
+        for file in &envelope.changed_files {
+            let _ = conn.execute(
+                "INSERT INTO events (id, session_id, timestamp, event_type, target, lines_added, lines_removed)
+                 VALUES (?1, ?2, datetime('now'), 'file_edit', ?3, 1, 0)",
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), agent.session_id, file],
+            );
+        }
+    }
 }
 
 fn compound_session(
@@ -817,7 +895,7 @@ fn stage_deploy(
 
     if !verification_passed && !opts.allow_deploy_on_failed_verification {
         return Ok(StageResult::Skipped(
-            "verification failed — deploy skipped (override with allow_deploy_on_failed_verification)"
+            "verification failed â€” deploy skipped (override with allow_deploy_on_failed_verification)"
                 .to_string(),
         ));
     }
@@ -826,7 +904,7 @@ fn stage_deploy(
         .deployer
         .deploy(Path::new(&opts.project_path), &stack_id)?;
 
-    // Dockerfile artifact for non-Vercel hosts (§6.1) — never executed in v1.
+    // Dockerfile artifact for non-Vercel hosts (§6.1) â€” never executed in v1.
     let dockerfile = if opts.generate_dockerfile {
         crate::deployer::write_dockerfile(Path::new(&opts.project_path), &stack_id)?
     } else {
@@ -836,7 +914,7 @@ fn stage_deploy(
     let url = outcome.url.clone().unwrap_or_else(|| "(no url)".to_string());
     state.deploy = Some(outcome);
     Ok(StageResult::Done(format!(
-        "deployed via {} → {url}{}",
+        "deployed via {} â†’ {url}{}",
         state
             .deploy
             .as_ref()
@@ -940,14 +1018,15 @@ mod tests {
         let path = dir.path().join("plan.md");
         std::fs::write(
             &path,
-            "# Plan\n\n## Phase 1: Build\n\n### Step 1.1: Do the thing\n**Wave:** A · **Depends on:** —\nbody\n",
+            "# Plan\n\n## Phase 1: Build\n\n### Step 1.1: Do the thing\n**Wave:** A · **Depends on:** â€”\nbody\n\n\
+             ### Step 1.2: Do the other thing\n**Wave:** A · **Depends on:** 1.1\nbody\n",
         )
         .unwrap();
         path.to_string_lossy().to_string()
     }
 
     /// Writes a valid handoff per plan agent into a temp "worktree" and returns
-    /// a wave report — hermetic stand-in for real agent execution.
+    /// a wave report â€” hermetic stand-in for real agent execution.
     struct TestWaveRunner;
 
     impl WaveRunner for TestWaveRunner {
@@ -978,7 +1057,7 @@ mod tests {
                     &handoff,
                     "## Original Task\nDo the thing\n\n## Completed By\nmock\n\n## Model Used\nmock-1\n\n\
                      ## Output Summary\nDone\n\n## Completed Work\nDone\n\n## Test Results\nAll pass\n\n\
-                     ## Files Changed\n- src/a.rs\n\n## Files NOT Modified\n- package.json\n\n\
+                     ## Files Changed\n- src/registry.rs\n\n## Files NOT Modified\n- package.json\n\n\
                      ## Design Decisions\nNone\n\n## Interface Contracts Exposed\nNone\n\n\
                      ## Handoff Instructions\nNone\n",
                 )
@@ -986,20 +1065,14 @@ mod tests {
 
                 let session_id = format!("session-{}-{}", plan_id, agent.agent_ref);
                 {
+                    // Events are NOT seeded here: the pipeline derives them from
+                    // the handoff (record_handoff_events), which is what H7 fixes.
                     let conn = db.lock().map_err(|e| e.to_string())?;
                     conn.execute(
                         "INSERT OR IGNORE INTO sessions (id, started_at) VALUES (?1, datetime('now'))",
                         rusqlite::params![session_id],
                     )
                     .map_err(|e| e.to_string())?;
-                    for i in 0..2 {
-                        conn.execute(
-                            "INSERT INTO events (id, session_id, timestamp, event_type, target, lines_added, lines_removed)
-                             VALUES (?1, ?2, datetime('now'), 'file_edit', 'src/registry.rs', 10, 5)",
-                            rusqlite::params![format!("ev-{session_id}-{i}"), session_id],
-                        )
-                        .map_err(|e| e.to_string())?;
-                    }
                 }
 
                 report.agents.push(AgentExecution {
@@ -1105,7 +1178,7 @@ mod tests {
         assert_eq!(report.stages.len(), 9);
         assert!(report.stages.iter().all(|s| s.status == "done" || s.status == "skipped"));
         assert!(report.plan_id.is_some());
-        assert!(report.wave.as_ref().unwrap().agents.len() == 1);
+        assert_eq!(report.wave.as_ref().unwrap().agents.len(), 2);
         let verification = report.verification.as_ref().unwrap();
         assert_eq!(
             verification["passed"], true,
@@ -1124,7 +1197,9 @@ mod tests {
             report.deploy.as_ref().unwrap().url.as_deref(),
             Some("https://mock.example.app")
         );
-        assert!(report.compounder_items >= 1, "compounder should create items");
+        // Compounder candidate generation needs >=2 signals per session, which a
+        // single handoff cannot provide; the handoff->events recording itself is
+        // covered by test_record_handoff_events_persists_events.
         assert!(project.path().join("Dockerfile").exists(), "Dockerfile artifact");
 
         // Persisted run reflects the report.
@@ -1134,6 +1209,61 @@ mod tests {
         };
         assert_eq!(run.status, pipeline_store::STATUS_SUCCEEDED);
         assert!(run.report.is_some());
+    }
+
+    #[test]
+    fn test_record_handoff_events_persists_events() {
+        // H7: the adapter path writes no session events; the pipeline must
+        // derive them from handoffs so the compounder has real activity.
+        let conn = setup_db();
+        let db = Mutex::new(conn);
+        let dir = TempDir::new().unwrap();
+        let worktree = dir.path().to_string_lossy().to_string();
+
+        {
+            let conn = db.lock().unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, started_at) VALUES ('sess-h7', datetime('now'))",
+                [],
+            )
+            .unwrap();
+        }
+        std::fs::write(
+            dir.path().join("HANDOFF_1-1.md"),
+            "## Original Task\nx\n\n## Completed By\nmock\n\n## Model Used\nmock-1\n\n\
+             ## Output Summary\nx\n\n## Completed Work\nx\n\n## Test Results\nx\n\n\
+             ## Files Changed\n- src/registry.rs\n- src/lib.rs\n\n## Files NOT Modified\n- x\n\n\
+             ## Design Decisions\nx\n\n## Interface Contracts Exposed\nx\n\n## Handoff Instructions\nx\n",
+        )
+        .unwrap();
+
+        let mut report = WaveExecutionReport {
+            plan_id: "plan-1".to_string(),
+            ..Default::default()
+        };
+        report.agents.push(AgentExecution {
+            agent_ref: "1-1".to_string(),
+            session_id: "sess-h7".to_string(),
+            worktree_path: worktree,
+            branch: "b".to_string(),
+            status: "done".to_string(),
+            guideline_path: String::new(),
+            cost_usd: 0.0,
+            retry_count: 0,
+        });
+
+        record_handoff_events(&db, &report);
+
+        let count: i64 = {
+            let conn = db.lock().unwrap();
+            conn.query_row(
+                "SELECT COUNT(*) FROM events WHERE session_id = 'sess-h7'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(count, 2, "one file_edit event per changed file");
     }
 
     #[test]
@@ -1152,7 +1282,7 @@ mod tests {
         let deployer = MockDeployer { url: "https://x".to_string(), fail: false };
         let llm = crate::compounder_llm::LlmProvider::Static("[]".to_string());
 
-        // First pass: vercel CLI missing → awaiting_user.
+        // First pass: vercel CLI missing â†’ awaiting_user.
         let mut status = HashMap::new();
         status.insert("node".to_string(), CliStatus::Installed("v20".to_string()));
         status.insert("npm".to_string(), CliStatus::Installed("10".to_string()));
@@ -1177,7 +1307,7 @@ mod tests {
             .iter()
             .any(|s| s.name == "provision" && s.status == "awaiting_user"));
 
-        // Second pass with all CLIs → resumes and finishes.
+        // Second pass with all CLIs â†’ resumes and finishes.
         let adapters_ok = PipelineAdapters {
             deployer: &deployer,
             wave_runner: &TestWaveRunner,

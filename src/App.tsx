@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Route, Routes, Navigate } from "react-router-dom";
+import { Route, Routes, Navigate, useLocation } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { RecoveryBanner } from "@/components/RecoveryBanner";
@@ -22,6 +22,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { AppStateSnapshot } from "@/lib/types";
 
 function App() {
+  const location = useLocation();
   const hasCheckedRef = useRef(false);
   const [recoverySnapshot, setRecoverySnapshot] = useState<AppStateSnapshot | null>(null);
 
@@ -42,7 +43,7 @@ function App() {
           }
         }
       } catch {
-        // First launch — no snapshot exists
+        // First launch â€” no snapshot exists
       }
     })();
 
@@ -69,7 +70,7 @@ function App() {
             />
           )}
           <main className="flex-1 overflow-auto">
-            <ErrorBoundary>
+            <ErrorBoundary key={location.pathname}>
               <Routes>
               <Route path="/" element={<Navigate to="/runner" replace />} />
               <Route path="/runner" element={<Runner />} />

@@ -1,6 +1,6 @@
-﻿// src-tauri/src/wave_supervisor.rs
+// src-tauri/src/wave_supervisor.rs
 //
-// Agent supervision for wave execution (SPEC-001 Â§5 DG-5, Wave D Steps 4.1â€“4.3).
+// Agent supervision for wave execution (SPEC-001 §5 DG-5, Wave D Steps 4.1–4.3).
 //
 // After agents are spawned, the supervisor polls each agent's worktree for a
 // valid HANDOFF_<agent_ref>.md:
@@ -116,6 +116,7 @@ pub fn supervise_agents(
 ) -> Result<SupervisionOutcome, String> {
     let mut outcome = SupervisionOutcome::default();
     let plan_id = report.plan_id.clone();
+    let mut cancelled = false;
 
     for agent in report.agents.iter_mut() {
         if agent.status != "running" {
@@ -134,7 +135,8 @@ pub fn supervise_agents(
                     agent.status = "killed".to_string();
                     outcome.failed += 1;
                     outcome.cancelled = true;
-                    return Ok(outcome);
+                    cancelled = true;
+                    break;
                 }
                 WaitResult::Timeout(reason) => {
                     let _ = control.kill(agent);
@@ -168,6 +170,17 @@ pub fn supervise_agents(
                     record_correction(db, &plan_id, agent, reason);
                     break;
                 }
+            }
+        }
+    }
+
+    // Cancellation stops the whole wave: kill any sibling agents still running.
+    if cancelled {
+        for agent in report.agents.iter_mut() {
+            if agent.status == "running" {
+                let _ = control.kill(agent);
+                agent.status = "killed".to_string();
+                outcome.failed += 1;
             }
         }
     }
@@ -374,4 +387,3 @@ mod tests {
         );
     }
 }
-

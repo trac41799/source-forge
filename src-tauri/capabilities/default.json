@@ -12,7 +12,6 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-set-title",
-    "shell:allow-open",
     "sql:default",
     "sql:allow-load",
     "sql:allow-execute",

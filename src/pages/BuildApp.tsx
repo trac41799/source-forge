@@ -179,12 +179,15 @@ export default function BuildApp() {
             </select>
           </label>
           <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Agent command</span>
-            <Input
+            <span className="text-muted-foreground">Agent</span>
+            <select
+              className="h-9 w-full rounded-md border border-input bg-transparent px-3 text-sm"
               value={agentCommand}
               onChange={(e) => setAgentCommand(e.target.value)}
-              placeholder="opencode"
-            />
+            >
+              <option value="opencode">OpenCode</option>
+              <option value="mock">Mock (no real agent)</option>
+            </select>
           </label>
         </div>
         <div className="flex items-center gap-3">

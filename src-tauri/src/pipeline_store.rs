@@ -13,10 +13,16 @@ pub const STATUS_PENDING: &str = "pending";
 pub const STATUS_RUNNING: &str = "running";
 pub const STATUS_AWAITING_USER: &str = "awaiting_user";
 pub const STATUS_SUCCEEDED: &str = "succeeded";
+pub const STATUS_VERIFICATION_FAILED: &str = "verification_failed";
 pub const STATUS_FAILED: &str = "failed";
 pub const STATUS_CANCELLED: &str = "cancelled";
 
-pub const TERMINAL_STATUSES: &[&str] = &[STATUS_SUCCEEDED, STATUS_FAILED, STATUS_CANCELLED];
+pub const TERMINAL_STATUSES: &[&str] = &[
+    STATUS_SUCCEEDED,
+    STATUS_VERIFICATION_FAILED,
+    STATUS_FAILED,
+    STATUS_CANCELLED,
+];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StageLogEntry {
@@ -96,6 +102,26 @@ pub fn create_run(
     )
     .map_err(|e| e.to_string())?;
     get_run(db, &id)
+}
+
+/// Decide whether a build may start for `project_path`:
+/// - `Err` when a run is already `running` (prevents double-submit/duplicate runs)
+/// - `Ok(Some(run))` when a resumable (pending/awaiting_user) run exists
+/// - `Ok(None)` when a new run should be created
+pub fn claim_startable_run(
+    db: &Connection,
+    project_path: &str,
+) -> Result<Option<BuildRun>, String> {
+    if let Some(existing) = find_resumable_run(db, project_path)? {
+        if existing.status == STATUS_RUNNING {
+            return Err(format!(
+                "A build is already running for this project (run {})",
+                existing.id
+            ));
+        }
+        return Ok(Some(existing));
+    }
+    Ok(None)
 }
 
 pub fn get_run(db: &Connection, id: &str) -> Result<BuildRun, String> {

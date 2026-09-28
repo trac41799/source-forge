@@ -81,14 +81,20 @@ function scanInvocations() {
   const invoked = new Set<string>();
   const literalSites: string[] = [];
   const unknownKeys: string[] = [];
+  const siteCounts = new Map<string, number>();
 
   for (const file of files) {
     const rel = path.relative(ROOT, file).split(path.sep).join("/");
     const src = fs.readFileSync(file, "utf8");
 
-    for (const m of src.matchAll(/\binvoke\b[^(]*\(\s*"([^"]+)"/g)) {
+    // Match single quotes, double quotes and backticks — the previous
+    // double-quote-only regex silently skipped a large share of call sites.
+    for (const m of src.matchAll(/\binvoke\b[^(]*\(\s*['"`]([^'"`]+)['"`]/g)) {
       invoked.add(m[1]);
-      literalSites.push(`${rel}::${m[1]}`);
+      const key = `${rel}::${m[1]}`;
+      const occurrence = (siteCounts.get(key) ?? 0) + 1;
+      siteCounts.set(key, occurrence);
+      literalSites.push(`${key}#${occurrence}`);
     }
     for (const m of src.matchAll(/\binvoke\b[^(]*\(\s*IPC\.([A-Za-z_]\w*)/g)) {
       const name = constants[m[1]];
@@ -130,6 +136,14 @@ describe("IPC contract", () => {
 
   it("every IPC.* key resolves to a command name", () => {
     expect(unknownKeys).toEqual([]);
+  });
+
+  it("scans single-quoted invokes too (regression)", () => {
+    // Regression: the scanner previously only matched double quotes, hiding
+    // dead commands such as `detect_stack` / `check_skillbridge_status`.
+    expect(
+      literalSites.some((site) => site.startsWith("src/stores/agentStore.ts::"))
+    ).toBe(true);
   });
 
   it("no new inline invoke(\"...\") literals beyond the baseline (ratchet)", () => {

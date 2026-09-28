@@ -1,7 +1,6 @@
 [
   "cancel_build_app_cmd",
   "check_cli_cmd",
-  "check_skillbridge",
   "claim_file_cmd",
   "create_delegation_report_cmd",
   "decide_orchestration_path_cmd",
@@ -12,7 +11,6 @@
   "finalize_wave_cmd",
   "generate_deploy_config_cmd",
   "generate_orchestrator_guideline_cmd",
-  "get_agent_output",
   "get_build_app_status_cmd",
   "get_project_locks_cmd",
   "get_subagent_patterns_cmd",
@@ -21,11 +19,7 @@
   "kg_classify_relation",
   "kg_encode_concept",
   "kg_solve_analogy",
-  "kill_agent",
-  "list_agents",
   "list_available_stacks_cmd",
-  "log_event",
-  "log_event_with_payload",
   "missing_clis_for_stack_cmd",
   "provision_stack_cmd",
   "recommend_stack_cmd",
@@ -36,9 +30,7 @@
   "scaffold_project_cmd",
   "seed_wave_from_spec_cmd",
   "set_project_path",
-  "spawn_agent",
   "spawn_agent_with_guards",
   "update_cron_execution_cmd",
-  "verify_project_cmd",
-  "write_to_agent"
+  "verify_project_cmd"
 ]

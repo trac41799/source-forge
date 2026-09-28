@@ -1,4 +1,4 @@
-﻿// src-tauri/src/pipeline_commands.rs
+// src-tauri/src/pipeline_commands.rs
 //
 // Tauri command surface for the supervised build pipeline (Step 3.7).
 //
@@ -108,7 +108,7 @@ pub async fn build_app_cmd(
     // Resume a non-terminal run for the same project path, or create a new one.
     let run: BuildRun = {
         let db = state.db.lock().map_err(|e| e.to_string())?;
-        match pipeline_store::find_resumable_run(&db, &options.project_path)? {
+        match pipeline_store::claim_startable_run(&db, &options.project_path)? {
             Some(existing) => existing,
             None => pipeline_store::create_run(
                 &db,
@@ -172,4 +172,3 @@ pub async fn get_build_app_status_cmd(
     let db = state.db.lock().map_err(|e| e.to_string())?;
     pipeline_store::get_run(&db, &run_id)
 }
-

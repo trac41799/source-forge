@@ -210,46 +210,50 @@ pub fn update_knowledge_item(
 ) -> Result<KnowledgeItem, String> {
     let now = Utc::now().to_rfc3339();
     let mut sets: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
-    if updates.title.is_some() {
-        sets.push(format!("title = '{}'", updates.title.as_ref().unwrap()));
+    if let Some(title) = &updates.title {
+        params.push(Box::new(title.clone()));
+        sets.push(format!("title = ?{}", params.len()));
     }
-    if updates.content.is_some() {
-        sets.push(format!(
-            "content = '{}'",
-            updates.content.as_ref().unwrap()
-        ));
+    if let Some(content) = &updates.content {
+        params.push(Box::new(content.clone()));
+        sets.push(format!("content = ?{}", params.len()));
     }
-    if updates.tags.is_some() {
-        sets.push(format!("tags = '{}'", updates.tags.as_ref().unwrap()));
+    if let Some(tags) = &updates.tags {
+        params.push(Box::new(tags.clone()));
+        sets.push(format!("tags = ?{}", params.len()));
     }
-    if updates.stack_tags.is_some() {
-        sets.push(format!(
-            "stack_tags = '{}'",
-            updates.stack_tags.as_ref().unwrap()
-        ));
+    if let Some(stack_tags) = &updates.stack_tags {
+        params.push(Box::new(stack_tags.clone()));
+        sets.push(format!("stack_tags = ?{}", params.len()));
     }
-    if updates.agent_tags.is_some() {
-        sets.push(format!(
-            "agent_tags = '{}'",
-            updates.agent_tags.as_ref().unwrap()
-        ));
+    if let Some(agent_tags) = &updates.agent_tags {
+        params.push(Box::new(agent_tags.clone()));
+        sets.push(format!("agent_tags = ?{}", params.len()));
     }
-    if let Some(c) = updates.confidence {
-        sets.push(format!("confidence = {}", c));
+    if let Some(confidence) = updates.confidence {
+        params.push(Box::new(confidence));
+        sets.push(format!("confidence = ?{}", params.len()));
     }
-    if let Some(ref s) = updates.status {
-        sets.push(format!("status = '{}'", s));
+    if let Some(status) = &updates.status {
+        params.push(Box::new(status.clone()));
+        sets.push(format!("status = ?{}", params.len()));
     }
-    sets.push(format!("last_confirmed = '{}'", now));
+    params.push(Box::new(now));
+    sets.push(format!("last_confirmed = ?{}", params.len()));
 
     if !sets.is_empty() {
+        params.push(Box::new(id.to_string()));
         let sql = format!(
-            "UPDATE knowledge_items SET {} WHERE id = '{}'",
+            "UPDATE knowledge_items SET {} WHERE id = ?{}",
             sets.join(", "),
-            id
+            params.len()
         );
-        db.execute(&sql, []).map_err(|e| e.to_string())?;
+        let bound: Vec<&dyn rusqlite::types::ToSql> =
+            params.iter().map(|p| p.as_ref()).collect();
+        db.execute(&sql, bound.as_slice())
+            .map_err(|e| e.to_string())?;
     }
 
     db.query_row(

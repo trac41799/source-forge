@@ -1,4 +1,4 @@
-﻿import { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { IPC } from "@/lib/ipc/commands";
 
@@ -26,7 +26,7 @@ interface DecisionReview {
  */
 export function DecisionPanel() {
   const [config, setConfig] = useState<DecisionConfig | null>(null);
-  const [health, setHealth] = useState("â€¦");
+  const [health, setHealth] = useState("…");
   const [reviews, setReviews] = useState<DecisionReview[]>([]);
   const [error, setError] = useState<string | null>(null);
 
@@ -70,7 +70,7 @@ export function DecisionPanel() {
     );
   }
   if (!config) {
-    return <div className="text-xs text-muted-foreground">Loading decision layerâ€¦</div>;
+    return <div className="text-xs text-muted-foreground">Loading decision layer…</div>;
   }
 
   return (
@@ -135,4 +135,3 @@ export function DecisionPanel() {
     </div>
   );
 }
-

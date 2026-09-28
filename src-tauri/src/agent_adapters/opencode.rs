@@ -51,18 +51,24 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn version(&self) -> &str {
-        // Try to get version from CLI
-        let output = std::process::Command::new(&self.binary_path)
-            .arg("--version")
-            .output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                let version = String::from_utf8_lossy(&o.stdout);
-                Box::leak(version.trim().to_string().into_boxed_str())
+        // Cache once (previously leaked a String on every call) and go through
+        // `cmd /C` on Windows so the npm `.cmd` shim resolves.
+        static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| {
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").arg(&self.binary_path);
+                c
+            } else {
+                std::process::Command::new(&self.binary_path)
+            };
+            match cmd.arg("--version").output() {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => "unknown".to_string(),
             }
-            _ => "unknown",
-        }
+        })
     }
 
     fn spawn(&self, task: &str, worktree: &str) -> Result<AgentSession, String> {
@@ -214,12 +220,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_opencode_adapter_spawn_creates_session() {
+    async fn test_opencode_adapter_spawn_smoke() {
+        // Environment-dependent: if the CLI resolves we get a well-formed
+        // session; otherwise the error must be descriptive. (Not vacuous.)
         let adapter = OpenCodeAdapter::new();
-        let result = adapter.spawn("test task", "/tmp");
-        // Will fail because opencode is not installed or /tmp doesn't exist
-        // But we can check the error message
-        assert!(result.is_err() || result.is_ok());
+        match adapter.spawn("test task", ".") {
+            Ok(session) => {
+                assert_eq!(session.agent_id, "opencode");
+                assert!(!session.id.is_empty());
+                assert_eq!(session.worktree, ".");
+            }
+            Err(error) => assert!(!error.is_empty(), "error must be descriptive"),
+        }
     }
 
     #[tokio::test]

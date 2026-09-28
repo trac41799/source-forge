@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { invoke } from '@tauri-apps/api/core'
+import { detectStack as detectStackFromFs } from '../lib/project/detector'
 import type { ProjectProfile } from '../lib/types'
 
 interface ProjectStore {
@@ -31,8 +31,18 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   detectStack: async (path: string): Promise<ProjectProfile> => {
     try {
-      const profile = await invoke<ProjectProfile>('detect_stack', { path })
-      return profile
+      const partial = await detectStackFromFs(path)
+      return {
+        id: crypto.randomUUID(),
+        path,
+        name: path.split('/').pop() || 'Unknown',
+        stack: [],
+        active_agents: [],
+        active_skills: [],
+        active_mcps: [],
+        preferred_models: [],
+        ...partial,
+      }
     } catch {
       return {
         id: crypto.randomUUID(),
