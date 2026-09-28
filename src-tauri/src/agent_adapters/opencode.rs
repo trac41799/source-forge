@@ -68,13 +68,37 @@ impl AgentAdapter for OpenCodeAdapter {
     fn spawn(&self, task: &str, worktree: &str) -> Result<AgentSession, String> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        // Build command: opencode run "task" --title "session_id"
-        let mut cmd = Command::new(&self.binary_path);
+        // Build command: opencode run "<task>" --title "<session_id>" --auto [--model <model>]
+        //
+        // On Windows the npm-installed CLI is a `.cmd` shim, which
+        // `Command::new("opencode")` cannot execute directly — go through
+        // `cmd /C` so PATHEXT resolution applies.
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&self.binary_path);
+            c
+        } else {
+            Command::new(&self.binary_path)
+        };
+
         cmd.arg("run")
             .arg(task)
             .arg("--title")
             .arg(&session_id)
-            .current_dir(worktree)
+            // Headless runs must auto-approve permissions or they block on a
+            // prompt forever (observed in the Wave F acceptance run).
+            .arg("--auto");
+
+        // The default model may not be tool-capable (it can claim success
+        // without writing files). Allow the operator to pin one.
+        if let Ok(model) = std::env::var("ACC_AGENT_MODEL") {
+            let model = model.trim();
+            if !model.is_empty() {
+                cmd.arg("--model").arg(model);
+            }
+        }
+
+        cmd.current_dir(worktree)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

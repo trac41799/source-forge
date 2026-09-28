@@ -51,3 +51,6 @@ landing/out/
 !app-icon.png
 !landing/public/*.png
 !src-tauri/icons/*.png
+
+# Fixture repo used by the agent E2E probe (has its own .git)
+tools/fixtures/fixture-repo/.git/
