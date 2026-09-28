@@ -40,6 +40,8 @@ mod spec_parser;
 mod verification;
 mod wave_persistence;
 mod integration_tests;
+#[cfg(test)]
+mod real_pipeline_test;
 mod stack_registry;
 mod preferences;
 mod provisioner;

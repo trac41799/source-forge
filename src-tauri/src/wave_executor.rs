@@ -11,6 +11,7 @@
 // - Agent events (Feature 3) for real-time streaming
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -267,10 +268,15 @@ pub async fn execute_wave_with_adapters(
 
     // 5. For each agent: create worktree + write guideline + spawn via adapter
     for agent in &plan_agents {
-        let worktree_path = format!(
-            ".worktrees/{}-{}",
-            config.plan_id, agent.agent_ref
-        );
+        // Absolute path *inside the base repo*: a bare `.worktrees/...` is
+        // resolved by git relative to the repo (`-C`) but by the guideline
+        // writer / agent CWD relative to the process, so the agent would run in
+        // a stray empty directory with only `.acc/GUIDELINE.md` in it.
+        let worktree_path = Path::new(&config.base_repo)
+            .join(".worktrees")
+            .join(format!("{}-{}", config.plan_id, agent.agent_ref))
+            .to_string_lossy()
+            .to_string();
         let branch = format!("agent/{}-{}", config.plan_id, agent.agent_ref);
 
         // 5a. Create the worktree
@@ -294,8 +300,16 @@ pub async fn execute_wave_with_adapters(
             &config.agent_base_args,
         )?;
 
-        // 5c. Spawn via adapter
-        let session = adapter.spawn(&agent.task, &worktree_path)?;
+        // 5c. Spawn via adapter. The guideline (which carries the task, the
+        // repo conventions and the exact HANDOFF_<agent_ref>.md filename) is the
+        // prompt — passing only `agent.task` left the agent unaware it had to
+        // write a handoff, so the first attempt could never satisfy the
+        // supervisor.
+        let task_prompt = std::fs::read_to_string(&guideline_path)
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+            .unwrap_or_else(|| agent.task.clone());
+        let session = adapter.spawn(&task_prompt, &worktree_path)?;
 
         report.agents.push(AgentExecution {
             agent_ref: agent.agent_ref.clone(),

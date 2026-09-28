@@ -120,7 +120,7 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stdout) = child.stdout.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] {}", session_id_clone, line));
@@ -132,7 +132,7 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stderr) = child.stderr.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] [stderr] {}", session_id_clone, line));
@@ -144,7 +144,7 @@ impl AgentAdapter for OpenCodeAdapter {
         let handle = ProcessHandle { child, output_tx };
         let processes = self.processes.clone();
         let session_id_store = session_id.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut procs = processes.lock().await;
             procs.insert(session_id_store, handle);
         });
@@ -161,7 +161,10 @@ impl AgentAdapter for OpenCodeAdapter {
         let processes = self.processes.clone();
         let session_id = session.id.clone();
 
-        tokio::spawn(async move {
+        // Tauri's global runtime, not `tokio::spawn`: the supervisor kills
+        // agents from the pipeline's synchronous stage loop, where no Tokio
+        // runtime is in scope ("there is no reactor running" panic).
+        tauri::async_runtime::spawn(async move {
             let mut procs = processes.lock().await;
             if let Some(handle) = procs.get_mut(&session_id) {
                 handle.kill().await;
