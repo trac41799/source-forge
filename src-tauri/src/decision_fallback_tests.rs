@@ -135,6 +135,31 @@ fn kg_typing_falls_back_to_llm_types() {
     assert_eq!(keep, vec![true], "entity not dropped");
 }
 
+/// R51's "record the degradation" clause: a fallback writes a `decision_usage`
+/// row with `policy_outcome = 'fallback'`.
+#[test]
+fn fallback_records_usage_degradation() {
+    let conn = db_with_schema();
+    let cfg = DecisionConfig::default();
+    let _ = crate::decision::judge(
+        &cfg,
+        &OfflineTransport,
+        Some("k"),
+        &serde_json::json!("s"),
+        "?",
+        "q",
+        Some(&conn),
+    );
+    let outcome: String = conn
+        .query_row(
+            "SELECT policy_outcome FROM decision_usage ORDER BY rowid DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(outcome, "fallback", "degradation must be recorded");
+}
+
 /// contradiction/merge → `jaccard_similarity` fallback records the relation.
 #[test]
 fn contradiction_falls_back_to_jaccard() {

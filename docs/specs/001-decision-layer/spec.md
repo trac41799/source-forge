@@ -127,8 +127,10 @@ product's confidence numbers real.
 - **R51** WHEN no backend is available (offline, timeout, no model) THEN each consumer
   SHALL fall back to its documented prior behavior and record the degradation — never
   block an agent session. *AC:* the offline fallback matrix
-  (`implementation-details/decision-contract.md`) passes as an integration test
-  (`src-tauri/src/decision_fallback_tests.rs`).
+  (`implementation-details/decision-contract.md`) is covered by
+  `src-tauri/src/decision_fallback_tests.rs` for the transport-seam consumers (core,
+  deployment verify, KG typing, contradiction) and by the remaining consumers' module
+  unit tests; a fallback also records a `decision_usage` row (`policy_outcome='fallback'`).
 - **R52** WHEN configuring backends THEN Settings SHALL allow hosted/local selection and
   display health. *AC:* health check = a live probe (empty `state`, one `noul` question
   "is this endpoint reachable") carrying no real data, or last success < 10 min; shows
@@ -152,7 +154,7 @@ Reachability is authoritative in `architecture.md §5`.
 
 | State | Requirements |
 |---|---|
-| **Delivered (reachable)** | R1–R8, R10–R12, R20–R23, R30, R31, R40, R41, R50, R52, R53 |
+| **Delivered (reachable)** | R1–R8, R10–R12, R20–R23, R30, R31, R40, R41, R50, R51, R52, R53 |
 | **Partial** | none |
 | **Deferred** | none — all integration points wired (`architecture.md §5`); all High risks mitigated (`review-round7.md`) |
 

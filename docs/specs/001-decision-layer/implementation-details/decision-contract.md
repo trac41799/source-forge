@@ -110,3 +110,11 @@ input_tokens, cost, truncated, created_at` — no `state` column.
 | handoff verify | schema-only check (`handoff_parser.rs:26`) |
 | deployment verify | deterministic checks only (`verification.rs:93`) |
 | contradiction/merge | `jaccard_similarity` (`knowledge.rs:1008,1036`; shared-word `knowledge.rs:312`) |
+
+## Privacy / egress (R6, R31)
+`decision_usage` stores no `state` and no secret (R6); the API key never appears in a payload
+or log. **Note (R31):** the semantic secrets check *must see* the wave's changes, so the collected
+wave diff — including untracked/gitignored secret-named file bodies (bounded) — is sent to the
+configured backend. That is by design (detecting a secret requires inspecting it); the backend is
+the operator-selected endpoint, and this egress is the only place non-README content leaves the
+machine.
