@@ -92,6 +92,8 @@ async fn run_on_blocking_thread(
             event_sink: &sink,
             llm: &llm,
             cli_status: None,
+            install_deps: true,
+            deliver: true,
             run_compounder: true,
         };
 

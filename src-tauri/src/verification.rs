@@ -232,6 +232,49 @@ const REQUIRED_PACKAGE_SCRIPTS: &[&str] = &[
 // ── Core Verification ──────────────────────────────────────────────────
 
 pub fn verify_project(base: &Path) -> VerificationReport {
+    verify_project_with(base, VerifyMode::Lenient)
+}
+
+/// How strictly checks that need an installed toolchain are treated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyMode {
+    /// Missing tooling → `Skip` (hermetic tests, projects without deps).
+    Lenient,
+    /// Missing tooling → `Fail`: "verification passed" must mean the build and
+    /// runtime checks actually ran. Used by the pipeline when it installed the
+    /// project's dependencies.
+    RequireBuild,
+}
+
+/// Checks that must have executed for a `RequireBuild` verification to pass.
+const BUILD_GATED_CHECKS: [&str; 3] = [
+    "node_modules installed",
+    "npm run build passes",
+    "E2E runtime test",
+];
+
+pub fn verify_project_with(base: &Path, mode: VerifyMode) -> VerificationReport {
+    let mut report = verify_project_lenient(base);
+    if mode == VerifyMode::RequireBuild {
+        let mut downgraded = false;
+        for check in report.checks.iter_mut() {
+            if BUILD_GATED_CHECKS.contains(&check.name.as_str()) {
+                if let CheckStatus::Skip(detail) = &check.status {
+                    let message = format!("required build step did not run: {detail}");
+                    check.status = CheckStatus::Fail(message.clone());
+                    check.detail = message;
+                    downgraded = true;
+                }
+            }
+        }
+        if downgraded {
+            report.passed = false;
+        }
+    }
+    report
+}
+
+fn verify_project_lenient(base: &Path) -> VerificationReport {
     let mut report = VerificationReport::new(&base.to_string_lossy());
 
     // ── 1. Project structure ──────────────────────────────────────
@@ -1354,5 +1397,56 @@ mod tests {
             )
             .unwrap();
         assert_eq!(n, 1, "review-band README check enqueues a review");
+    }
+
+
+    #[test]
+    fn test_require_build_turns_tooling_skips_into_failures() {
+        // A Node project without installed dependencies: lenient verification
+        // Skips the build/runtime checks (so "passed" could mean "never built").
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("package.json"),
+            r#"{"name":"x","scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+
+        let gated = [
+            "node_modules installed",
+            "npm run build passes",
+            "E2E runtime test",
+        ];
+
+        let lenient = verify_project(dir.path());
+        let skipped = lenient
+            .checks
+            .iter()
+            .filter(|check| {
+                gated.contains(&check.name.as_str())
+                    && matches!(check.status, CheckStatus::Skip(_))
+            })
+            .count();
+        assert!(skipped >= 1, "fixture must exercise the skip path");
+
+        let strict = verify_project_with(dir.path(), VerifyMode::RequireBuild);
+        assert!(!strict.passed, "un-run build steps must fail the run");
+        for name in gated {
+            let check = strict.checks.iter().find(|c| c.name == name).unwrap();
+            assert!(
+                !matches!(check.status, CheckStatus::Skip(_)),
+                "{name} must not silently skip in RequireBuild mode: {:?}",
+                check.status
+            );
+        }
+        let build = strict
+            .checks
+            .iter()
+            .find(|c| c.name == "npm run build passes")
+            .unwrap();
+        assert!(
+            format!("{:?}", build.status).contains("required build step did not run"),
+            "failure should explain why: {:?}",
+            build.status
+        );
     }
 }

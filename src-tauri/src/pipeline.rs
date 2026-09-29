@@ -276,6 +276,13 @@ pub struct PipelineAdapters<'a> {
     /// None = detect CLIs on this machine.
     pub cli_status: Option<HashMap<String, CliStatus>>,
     pub run_compounder: bool,
+    /// Install project dependencies before verification and treat an
+    /// un-runnable build/test as a verification failure. Production `true`;
+    /// hermetic tests `false` so they stay offline and deterministic.
+    pub install_deps: bool,
+    /// Commit each agent's work and merge it into the base branch (delivery).
+    /// Production `true`; hermetic tests use non-git stand-in worktrees.
+    pub deliver: bool,
 }
 
 enum StageResult {
@@ -296,6 +303,7 @@ struct PipelineState {
     verification: Option<crate::verification::VerificationReport>,
     deploy: Option<DeployOutcome>,
     compounder_items: usize,
+    merges: Option<crate::wave_executor::MergeReport>,
 }
 
 fn lock<'a>(db: &'a Mutex<Connection>) -> Result<std::sync::MutexGuard<'a, Connection>, String> {
@@ -439,6 +447,38 @@ pub fn run_pipeline(
         }
     }
 
+    // Work that could not be merged was not delivered: pause for the operator
+    // instead of verifying/deploying a project that is missing agent output.
+    if let Some(merges) = &state.merges {
+        if !merges.conflicts.is_empty() {
+            let detail = merges
+                .conflicts
+                .iter()
+                .map(|record| format!("{}: {}", record.agent_ref, record.detail))
+                .collect::<Vec<_>>()
+                .join("; ");
+            let message = format!(
+                "{} agent branch(es) could not be merged: {detail}",
+                merges.conflicts.len()
+            );
+            report.status = pipeline_store::STATUS_AWAITING_USER.to_string();
+            report.error = Some(message.clone());
+            finalize_report(db, opts, &mut report, &state)?;
+            {
+                let conn = lock(db)?;
+                pipeline_store::set_error(&conn, &opts.run_id, &message)?;
+                pipeline_store::update_status(
+                    &conn,
+                    &opts.run_id,
+                    pipeline_store::STATUS_AWAITING_USER,
+                    Some("report"),
+                )?;
+            }
+            adapters.event_sink.emit("report", "merge_conflict", &message);
+            return Ok(report);
+        }
+    }
+
     // A run whose agents never produced a valid handoff is NOT a success, even
     // when the project happens to satisfy verification (e.g. it already passed
     // before the agents ran). Pause instead of overclaiming: the operator can
@@ -533,6 +573,11 @@ fn finalize_report(
         "generate_dockerfile": opts.generate_dockerfile,
         "agent_timeout_secs": opts.agent_timeout_secs,
     });
+    // Delivery evidence: which agent branches were merged into the base branch.
+    if let Some(merges) = &state.merges {
+        report.artifacts["merges"] =
+            serde_json::to_value(merges).unwrap_or(serde_json::Value::Null);
+    }
 
     let conn = lock(db)?;
     pipeline_store::set_report(&conn, &opts.run_id, &serde_json::to_value(report).unwrap_or_default())
@@ -552,7 +597,7 @@ fn run_stage(
         BuildStage::Scaffold => stage_scaffold(opts, state),
         BuildStage::SeedPlan => stage_seed_plan(db, opts, state),
         BuildStage::ExecuteWaves => stage_execute_waves(db, opts, adapters, state),
-        BuildStage::FinalizeAndVerify => stage_finalize_and_verify(db, adapters, state),
+        BuildStage::FinalizeAndVerify => stage_finalize_and_verify(db, opts, adapters, state),
         BuildStage::Deploy => stage_deploy(opts, adapters, state),
         BuildStage::Report => Ok(StageResult::Done("report assembled".to_string())),
     }
@@ -825,6 +870,7 @@ fn stage_execute_waves(
 
 fn stage_finalize_and_verify(
     db: &Mutex<Connection>,
+    opts: &PipelineOptions,
     adapters: &PipelineAdapters,
     state: &mut PipelineState,
 ) -> Result<StageResult, String> {
@@ -847,9 +893,47 @@ fn stage_finalize_and_verify(
 
     // Feed the compounder: the adapter execution path writes no session events,
     // so derive them from the handoffs (otherwise compounder_items is always 0).
+    // Must run before the merge removes the worktrees.
     record_handoff_events(db, &finalized);
 
-    let verification = crate::verification::verify_project(Path::new(&project_path));
+    // Deliver: commit each completed agent's work and merge it into the base
+    // branch. Without this the agents' work stays stranded in worktrees and the
+    // project being verified/deployed contains none of it.
+    if adapters.deliver {
+        let merges = crate::wave_executor::merge_completed_agents(
+            &finalized,
+            &project_path,
+            &opts.base_branch,
+        );
+        adapters.event_sink.emit(
+            "finalize_and_verify",
+            "progress",
+            &format!(
+                "delivered {} agent branch(es), {} conflict(s)",
+                merges.merged.len(),
+                merges.conflicts.len()
+            ),
+        );
+        state.merges = Some(merges);
+    }
+
+    // Real build/test gate: install the project's dependencies so the build,
+    // typecheck and runtime checks actually execute instead of being Skipped.
+    if adapters.install_deps {
+        let detail = install_project_dependencies(&project_path)?;
+        adapters
+            .event_sink
+            .emit("finalize_and_verify", "progress", &detail);
+    }
+
+    let verification = if adapters.install_deps {
+        crate::verification::verify_project_with(
+            Path::new(&project_path),
+            crate::verification::VerifyMode::RequireBuild,
+        )
+    } else {
+        crate::verification::verify_project(Path::new(&project_path))
+    };
     let passed = verification.passed;
     state.verification = Some(verification);
 
@@ -935,6 +1019,85 @@ fn compound_session(
     Ok(items.len())
 }
 
+/// Hard cap on the dependency install so a hung registry cannot wedge a run.
+const DEPENDENCY_INSTALL_TIMEOUT_SECS: u64 = 900;
+
+/// Install the project's dependencies (`npm ci` when a lock file exists).
+///
+/// Without this the build/typecheck/runtime checks only had the option to Skip,
+/// so "verification passed" could mean "nothing was ever built".
+fn install_project_dependencies(project_path: &str) -> Result<String, String> {
+    let base = Path::new(project_path);
+    if !base.join("package.json").exists() {
+        return Ok("no package.json — no dependencies to install".to_string());
+    }
+    let args: Vec<&str> = if base.join("package-lock.json").exists() {
+        vec!["ci", "--no-audit", "--no-fund"]
+    } else {
+        vec!["install", "--no-audit", "--no-fund"]
+    };
+
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg("npm");
+        c
+    } else {
+        std::process::Command::new("npm")
+    };
+    cmd.args(&args).current_dir(base);
+
+    run_with_timeout(cmd, DEPENDENCY_INSTALL_TIMEOUT_SECS)
+        .map(|_| format!("dependencies installed (npm {})", args.join(" ")))
+}
+
+/// Run a command with a wall-clock timeout, sending its output to a temp log so
+/// a chatty child cannot deadlock on a full pipe. Failures carry the log tail.
+fn run_with_timeout(mut cmd: std::process::Command, secs: u64) -> Result<(), String> {
+    let log_path =
+        std::env::temp_dir().join(format!("sourceforge-cmd-{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let log_err = log.try_clone().map_err(|e| e.to_string())?;
+    let mut child = cmd
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
+        .spawn()
+        .map_err(|e| format!("cannot start command: {e}"))?;
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => return Ok(()),
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "command failed ({status}); output tail: {}",
+                    tail_of(&log_path)
+                ));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "timed out after {secs}s; output tail: {}",
+                        tail_of(&log_path)
+                    ));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+}
+
+fn tail_of(path: &Path) -> String {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    let tail: Vec<&str> = text.lines().rev().take(8).collect();
+    tail.into_iter().rev().collect::<Vec<_>>().join(" | ")
+}
+
 /// Agents that did not finish with a valid handoff, as `(agent_ref, status)`.
 /// A non-empty result means the promised work was not done.
 fn incomplete_agents(report: &crate::wave_executor::WaveExecutionReport) -> Vec<(String, String)> {
@@ -975,6 +1138,14 @@ fn stage_deploy(
     // happened to be in the worktree), so gate it like a failed verification
     // instead of pushing a half-done project to production.
     if !opts.allow_deploy_on_failed_verification {
+        if let Some(merges) = &state.merges {
+            if !merges.conflicts.is_empty() {
+                return Ok(StageResult::Skipped(format!(
+                    "{} agent branch(es) could not be merged — deploy skipped",
+                    merges.conflicts.len()
+                )));
+            }
+        }
         if let Some(wave) = &state.wave_report {
             let incomplete = incomplete_agents(wave);
             if !incomplete.is_empty() {
@@ -1260,6 +1431,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(all_clis_installed()),
+            install_deps: false,
+            deliver: false,
             run_compounder: true,
         };
 
@@ -1388,6 +1561,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(status),
+            install_deps: false,
+            deliver: false,
             run_compounder: false,
         };
 
@@ -1405,6 +1580,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(all_clis_installed()),
+            install_deps: false,
+            deliver: false,
             run_compounder: false,
         };
 
@@ -1441,6 +1618,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(all_clis_installed()),
+            install_deps: false,
+            deliver: false,
             run_compounder: false,
         };
 
@@ -1472,6 +1651,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(all_clis_installed()),
+            install_deps: false,
+            deliver: false,
             run_compounder: false,
         };
 
@@ -1542,6 +1723,8 @@ mod tests {
             event_sink: &NoopEventSink,
             llm: &llm,
             cli_status: Some(all_clis_installed()),
+            install_deps: false,
+            deliver: false,
             run_compounder: false,
         };
 
