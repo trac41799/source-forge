@@ -28,7 +28,11 @@ impl EventSink for TauriEventSink {
             "status": status,
             "message": message,
         });
-        let _ = self.app.emit(EVENT_NAME, payload);
+        // A failed emit is never fatal (the webview may be gone: shutdown,
+        // tests), but silently dropping progress hides breakage — log it.
+        if let Err(error) = self.app.emit(EVENT_NAME, payload) {
+            eprintln!("[build-app-progress] emit failed for stage '{stage}': {error}");
+        }
     }
 }
 

@@ -47,6 +47,13 @@ pub trait AgentAdapter: Send + Sync {
     fn is_running(&self, _session: &AgentSession) -> bool {
         true
     }
+
+    /// Cost reported by the session so far, if the adapter can tell. The
+    /// supervisor feeds this into the cost cap; `None` means "unknown" and the
+    /// cap cannot trigger for that adapter.
+    fn session_cost(&self, _session: &AgentSession) -> Option<f64> {
+        None
+    }
 }
 
 /// Mock adapter for testing

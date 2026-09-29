@@ -29,7 +29,20 @@ pub struct OpenCodeAdapter {
     processes: Arc<Mutex<HashMap<String, ProcessHandle>>>,
     /// Sessions whose process has exited (its output streams reached EOF).
     finished: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
+    /// Bounded tail of each session's stdout, used for cost accounting.
+    outputs: Arc<std::sync::Mutex<HashMap<String, String>>>,
 }
+
+/// Max bytes of stdout kept per session for cost parsing.
+const OUTPUT_TAIL_BYTES: usize = 32_768;
+
+/// Constant prompt handed to the agent. The real task text is written to
+/// `.acc/TASK.md` and never reaches the command line: on Windows the agent is
+/// launched through `cmd /C`, where `%VAR%` is expanded even inside quotes, so
+/// spec- or user-derived text in an argument is an injection vector.
+const TASK_POINTER_PROMPT: &str =
+    "Read .acc/TASK.md in this worktree and complete the task it describes. \
+     Write the handoff file it names in the repository root when done.";
 
 impl OpenCodeAdapter {
     pub fn new() -> Self {
@@ -37,6 +50,7 @@ impl OpenCodeAdapter {
             binary_path: "opencode".to_string(),
             processes: Arc::new(Mutex::new(HashMap::new())),
             finished: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            outputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -45,7 +59,56 @@ impl OpenCodeAdapter {
             binary_path: path,
             processes: Arc::new(Mutex::new(HashMap::new())),
             finished: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            outputs: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Write the task to `<worktree>/.acc/TASK.md` and return the constant
+    /// pointer prompt that is safe to pass as an argument.
+    fn write_task_file(worktree: &str, task: &str) -> Result<&'static str, String> {
+        let dir = std::path::Path::new(worktree).join(".acc");
+        std::fs::create_dir_all(&dir)
+            .map_err(|e| format!("Cannot create {}: {e}", dir.display()))?;
+        let path = dir.join("TASK.md");
+        std::fs::write(&path, task).map_err(|e| format!("Cannot write {}: {e}", path.display()))?;
+        Ok(TASK_POINTER_PROMPT)
+    }
+
+    /// Largest numeric `*cost*` value found in the output, across the whole
+    /// text and line by line. OpenCode's `--format json` events carry usage per
+    /// step; taking the maximum rather than a sum keeps the result an upper
+    /// bound (conservative for a cost cap) without double-counting retries.
+    fn parse_cost_from_output(text: &str) -> Option<f64> {
+        fn collect(value: &serde_json::Value, best: &mut Option<f64>) {
+            match value {
+                serde_json::Value::Object(map) => {
+                    for (key, item) in map {
+                        if key.to_ascii_lowercase().contains("cost") {
+                            if let Some(cost) = item.as_f64() {
+                                if best.map(|b| cost > b).unwrap_or(true) {
+                                    *best = Some(cost);
+                                }
+                            }
+                        }
+                        collect(item, best);
+                    }
+                }
+                serde_json::Value::Array(items) => {
+                    for item in items {
+                        collect(item, best);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let mut best = None;
+        for candidate in std::iter::once(text).chain(text.lines()) {
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(candidate) {
+                collect(&value, &mut best);
+            }
+        }
+        best
     }
 }
 
@@ -91,8 +154,15 @@ impl AgentAdapter for OpenCodeAdapter {
             Command::new(&self.binary_path)
         };
 
+        // The task text goes to a file; only the constant pointer reaches the
+        // command line (see TASK_POINTER_PROMPT).
+        let prompt = Self::write_task_file(worktree, task)?;
+
         cmd.arg("run")
-            .arg(task)
+            .arg(prompt)
+            // Machine-readable events so usage/cost can be accounted for.
+            .arg("--format")
+            .arg("json")
             .arg("--title")
             .arg(&session_id)
             // Headless runs must auto-approve permissions or they block on a
@@ -125,10 +195,25 @@ impl AgentAdapter for OpenCodeAdapter {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
             let finished = self.finished.clone();
+            let outputs = self.outputs.clone();
             tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] {}", session_id_clone, line));
+                    if let Ok(mut map) = outputs.lock() {
+                        let tail = map.entry(session_id_clone.clone()).or_default();
+                        tail.push_str(&line);
+                        tail.push('\n');
+                        if tail.len() > OUTPUT_TAIL_BYTES {
+                            let cut = tail.len() - OUTPUT_TAIL_BYTES;
+                            let boundary = tail
+                                .char_indices()
+                                .map(|(index, _)| index)
+                                .find(|index| *index >= cut)
+                                .unwrap_or(0);
+                            *tail = tail.split_off(boundary);
+                        }
+                    }
                 }
                 // EOF: the process exited. Lets the supervisor fail fast
                 // instead of polling until the deadline.
@@ -197,6 +282,12 @@ impl AgentAdapter for OpenCodeAdapter {
             .unwrap_or(false)
     }
 
+    fn session_cost(&self, session: &AgentSession) -> Option<f64> {
+        let outputs = self.outputs.lock().ok()?;
+        let text = outputs.get(&session.id)?;
+        Self::parse_cost_from_output(text)
+    }
+
     fn stream_output(&self, session: &AgentSession) -> Result<Vec<String>, String> {
         // For now, return empty vec (streaming is handled via output channel)
         // In the future, this could return buffered output
@@ -204,17 +295,7 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn parse_cost(&self, output: &str) -> Option<f64> {
-        // OpenCode outputs cost in JSON format
-        // Try both formats: {"cost_usd": 0.123} and {"usage": {"cost": 0.456}}
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(output) {
-            if let Some(c) = v.get("cost_usd").and_then(|x| x.as_f64()) {
-                return Some(c);
-            }
-            if let Some(c) = v.get("usage").and_then(|u| u.get("cost")).and_then(|x| x.as_f64()) {
-                return Some(c);
-            }
-        }
-        None
+        Self::parse_cost_from_output(output)
     }
 }
 
@@ -244,16 +325,61 @@ mod tests {
         assert_eq!(adapter.parse_cost(r#"{"other": "data"}"#), None);
     }
 
+    #[test]
+    fn test_parse_cost_from_json_lines() {
+        // OpenCode `--format json` emits one event per line.
+        let output = "{\"type\":\"start\"}\n\
+                      {\"type\":\"step_finish\",\"part\":{\"usage\":{\"cost\":0.0123}}}\n\
+                      {\"type\":\"step_finish\",\"part\":{\"usage\":{\"cost\":0.045}}}\n";
+        assert_eq!(OpenCodeAdapter::parse_cost_from_output(output), Some(0.045));
+
+        // Single-object shapes from the documented formats.
+        assert_eq!(
+            OpenCodeAdapter::parse_cost_from_output(r#"{"cost_usd": 0.5}"#),
+            Some(0.5)
+        );
+        assert_eq!(
+            OpenCodeAdapter::parse_cost_from_output("noise\n{\"usage\": {\"cost\": 0.75}}\n"),
+            Some(0.75)
+        );
+
+        // No cost information → None (the cap then cannot trigger).
+        assert_eq!(OpenCodeAdapter::parse_cost_from_output("plain output"), None);
+        assert_eq!(OpenCodeAdapter::parse_cost_from_output(""), None);
+    }
+
+    #[test]
+    fn test_task_text_never_reaches_the_command_line() {
+        // Hostile task text (cmd metacharacters and percent expansion).
+        let task = "do it & calc.exe | echo %PATH% > C:\\pwned.txt";
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().to_string_lossy().to_string();
+
+        let prompt = OpenCodeAdapter::write_task_file(&worktree, task).expect("task file");
+
+        // The argument handed to the process is a constant pointer...
+        assert_eq!(prompt, TASK_POINTER_PROMPT);
+        assert!(!prompt.contains("calc.exe"));
+        assert!(!prompt.contains('%'));
+        // ...and the task itself lives in the file the agent reads.
+        let written = std::fs::read_to_string(dir.path().join(".acc").join("TASK.md")).unwrap();
+        assert_eq!(written, task);
+    }
+
     #[tokio::test]
     async fn test_opencode_adapter_spawn_smoke() {
         // Environment-dependent: if the CLI resolves we get a well-formed
         // session; otherwise the error must be descriptive. (Not vacuous.)
         let adapter = OpenCodeAdapter::new();
-        match adapter.spawn("test task", ".") {
+        let dir = tempfile::TempDir::new().unwrap();
+        let worktree = dir.path().to_string_lossy().to_string();
+        match adapter.spawn("test task", &worktree) {
             Ok(session) => {
                 assert_eq!(session.agent_id, "opencode");
                 assert!(!session.id.is_empty());
-                assert_eq!(session.worktree, ".");
+                assert_eq!(session.worktree, worktree);
+                // Cost is unknown until the CLI reports it.
+                assert_eq!(adapter.session_cost(&session), None);
             }
             Err(error) => assert!(!error.is_empty(), "error must be descriptive"),
         }
