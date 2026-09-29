@@ -15,6 +15,8 @@ import {
   MinusCircle,
   ExternalLink,
   Loader2,
+  Ban,
+  RotateCcw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -82,6 +84,7 @@ export default function BuildApp() {
   const [progress, setProgress] = useState<string[]>([]);
   const [report, setReport] = useState<BuildReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
 
   useEffect(() => {
     if (project?.path && !projectPath) {
@@ -110,11 +113,60 @@ export default function BuildApp() {
 
   const canStart = specPath.trim().length > 0 && projectPath.trim().length > 0 && !running;
 
+  // `build_app_cmd` only returns when the pipeline finishes, so poll the active
+  // run id to be able to cancel (or resume) a long build from the UI.
+  useEffect(() => {
+    if (!running || !projectPath.trim()) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const run = await invoke<{ id: string } | null>(IPC.getActiveBuildRun, {
+          projectPath: projectPath.trim(),
+        });
+        if (!stopped && run?.id) setActiveRunId(run.id);
+      } catch {
+        // The run may not exist yet on the first tick.
+      }
+    };
+    void tick();
+    const timer = setInterval(tick, 2000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [running, projectPath]);
+
+  const cancel = async () => {
+    if (!activeRunId) return;
+    try {
+      await invoke(IPC.cancelBuildApp, { runId: activeRunId });
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const resume = async () => {
+    if (!activeRunId) return;
+    setRunning(true);
+    setError(null);
+    try {
+      const result = await invoke<BuildReport>(IPC.resumeBuildApp, {
+        runId: activeRunId,
+      });
+      setReport(result);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setRunning(false);
+    }
+  };
+
   const start = async () => {
     setRunning(true);
     setError(null);
     setReport(null);
     setProgress([]);
+    setActiveRunId(null);
     try {
       const result = await invoke<BuildReport>(IPC.buildApp, {
         options: {
@@ -199,6 +251,23 @@ export default function BuildApp() {
             )}
             {running ? "Building…" : "Build App"}
           </Button>
+          {running && (
+            <Button
+              variant="outline"
+              onClick={cancel}
+              disabled={!activeRunId}
+              className="gap-1.5"
+            >
+              <Ban className="size-4" />
+              Cancel
+            </Button>
+          )}
+          {!running && activeRunId && (
+            <Button variant="outline" onClick={resume} className="gap-1.5">
+              <RotateCcw className="size-4" />
+              Resume
+            </Button>
+          )}
           <span className="text-xs text-muted-foreground">
             Deploy runs only when verification passes.
           </span>
