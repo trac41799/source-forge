@@ -226,6 +226,8 @@ fn test_real_pipeline_end_to_end() {
         event_sink: &NoopEventSink,
         llm: &llm,
         cli_status: Some(all_clis_installed()),
+        install_deps: false,
+        deliver: true,
         run_compounder: false,
     };
 
@@ -310,6 +312,12 @@ fn test_real_pipeline_end_to_end() {
         project.path().join("Dockerfile").exists(),
         agent_greeting
     );
+    println!(
+        "delivery: greeting_in_base_project={} farewell_in_base_project={} merges={}",
+        project.path().join("src/greeting.ts").exists(),
+        project.path().join("src/farewell.ts").exists(),
+        report.artifacts["merges"]
+    );
     println!("========================\n");
 
     // Preserve artifacts for inspection: the worktrees live inside the fixture
@@ -331,22 +339,34 @@ fn test_real_pipeline_end_to_end() {
     );
     let wave = report.wave.as_ref().expect("wave report");
     assert!(!wave.agents.is_empty(), "no agents were spawned");
-    let with_handoff = wave
-        .agents
-        .iter()
-        .filter(|a| {
-            Path::new(&a.worktree_path)
-                .join(format!("HANDOFF_{}.md", a.agent_ref))
-                .exists()
-        })
-        .count();
-    assert_eq!(
-        with_handoff,
-        wave.agents.len(),
-        "agents without a valid handoff: {:?}",
+    assert!(
+        wave.agents.iter().all(|agent| agent.status == "done"),
+        "agents did not complete: {:?}",
         wave.agents
             .iter()
             .map(|a| (a.agent_ref.clone(), a.status.clone()))
             .collect::<Vec<_>>()
+    );
+
+    // Delivery: every agent branch is merged and the work is in the base project
+    // (not stranded in a worktree). Before the delivery step this was false.
+    let merges = &report.artifacts["merges"];
+    assert_eq!(
+        merges["conflicts"].as_array().map(Vec::len),
+        Some(0),
+        "no merge conflicts expected: {merges}"
+    );
+    assert_eq!(
+        merges["merged"].as_array().map(Vec::len),
+        Some(wave.agents.len()),
+        "every completed agent must be delivered: {merges}"
+    );
+    assert!(
+        project.path().join("src/greeting.ts").exists(),
+        "greeting.ts must be in the base project"
+    );
+    assert!(
+        project.path().join("src/farewell.ts").exists(),
+        "farewell.ts must be in the base project"
     );
 }
