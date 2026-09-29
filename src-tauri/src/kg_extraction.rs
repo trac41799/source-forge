@@ -115,7 +115,7 @@ pub fn run_llm_extraction_blocking(
 
 /// R-4: decide every entity type **and** the real-entity gate with two batched
 /// requests (instead of two per entity). Returns `(types, keep)`.
-fn plan_entities(
+pub(crate) fn plan_entities(
     cfg: &crate::decision::DecisionConfig,
     transport: &dyn crate::decision::DecisionTransport,
     key: Option<&str>,

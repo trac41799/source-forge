@@ -762,12 +762,12 @@ pub fn verify_project_cmd(
     let p = Path::new(&project_path);
     let mut report = crate::verification::verify_project(p);
     // M3 (spec R31): additive semantic checks when a decision backend is configured.
+    // R31: the secrets check must inspect the *wave's* collected diff, not the
+    // project source tree — so this project-level path passes no diff (README only).
     let readme = std::fs::read_to_string(p.join("README.md")).ok();
-    // R-7: feed the worktree diff so the semantic secrets check actually runs.
-    let wave_diff = crate::verification::collect_worktree_diff(&project_path);
     // R-1: independent connection — semantic checks call the decision layer.
     if let Ok(db) = crate::db::open_aux(&state.db_path) {
-        let semantic = crate::verification::semantic_checks(&db, readme.as_deref(), &wave_diff);
+        let semantic = crate::verification::semantic_checks(&db, readme.as_deref(), "");
         report.extend_with(semantic);
     }
     Ok(report)
@@ -779,13 +779,8 @@ pub async fn verify_and_finalize_wave_cmd(
     report: wave_executor::WaveExecutionReport,
     project_path: String,
 ) -> Result<serde_json::Value, String> {
-    use std::path::Path;
-    let mut wave_report = wave_executor::finalize_wave(&state.db, report).await?;
-    let verify = crate::verification::verify_project(Path::new(&project_path));
-    Ok(serde_json::json!({
-        "wave": wave_report,
-        "verification": verify
-    }))
+    // R31: wave verification runs deterministic + semantic checks on the wave diff.
+    wave_executor::finalize_wave_with_verify(&state.db, report, &project_path, &state.db_path).await
 }
 
 #[tauri::command]

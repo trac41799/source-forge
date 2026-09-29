@@ -202,18 +202,78 @@ pub async fn finalize_wave(
     Ok(report)
 }
 
-/// Finalize a wave WITH deployment verification.
-/// After agents finish, runs project verification and includes results.
+/// R31: collect the wave's **own** changes — each agent worktree's `git diff HEAD`
+/// — for the semantic secrets check. This is the wave's collected diff, never the
+/// project source tree. Bounded to 20 000 chars; non-git worktrees contribute nothing.
+pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
+    const CAP: usize = 20_000;
+    const PER_FILE: usize = 4_096;
+    let mut out = String::new();
+    for agent in &report.agents {
+        if agent.worktree_path.is_empty() {
+            continue;
+        }
+        if !std::path::Path::new(&agent.worktree_path).join(".git").exists() {
+            continue;
+        }
+        out.push_str(&format!("\n# {}\n", agent.agent_ref));
+        // Tracked changes.
+        if let Ok(o) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&agent.worktree_path)
+            .args(["diff", "HEAD", "--no-color", "--unified=0"])
+            .output()
+        {
+            if o.status.success() {
+                out.push_str(&String::from_utf8_lossy(&o.stdout));
+            }
+        }
+        // Untracked files are not in `git diff HEAD`, yet a brand-new `.env` is
+        // exactly where a hardcoded secret hides — include their contents.
+        if let Ok(o) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&agent.worktree_path)
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .output()
+        {
+            if o.status.success() {
+                for f in String::from_utf8_lossy(&o.stdout).lines() {
+                    let p = std::path::Path::new(&agent.worktree_path).join(f);
+                    if let Ok(content) = std::fs::read_to_string(&p) {
+                        out.push_str(&format!("\n# NEW FILE {f}\n"));
+                        out.push_str(&content.chars().take(PER_FILE).collect::<String>());
+                    }
+                }
+            }
+        }
+        if out.len() >= CAP {
+            break;
+        }
+    }
+    out.chars().take(CAP).collect()
+}
+
+/// Finalize a wave WITH deployment verification (R31): the deterministic checks
+/// plus semantic checks fed by the **wave's collected diff** (R-1: the semantic
+/// call uses an independent connection, so the shared lock is never held across HTTP).
 pub async fn finalize_wave_with_verify(
     db: &Mutex<Connection>,
     report: WaveExecutionReport,
     project_path: &str,
+    db_path: &std::path::Path,
 ) -> Result<serde_json::Value, String> {
     let wave_report = finalize_wave(db, report).await?;
-    let verify_report = crate::verification::verify_project(std::path::Path::new(project_path));
+    let wave_diff = collect_wave_diff(&wave_report);
+    let mut verify = crate::verification::verify_project(std::path::Path::new(project_path));
+    if let Ok(conn) = crate::db::open_aux(db_path) {
+        let readme =
+            std::fs::read_to_string(std::path::Path::new(project_path).join("README.md")).ok();
+        let semantic = crate::verification::semantic_checks(&conn, readme.as_deref(), &wave_diff);
+        verify.extend_with(semantic);
+    }
     Ok(serde_json::json!({
         "wave": wave_report,
-        "verification": verify_report
+        "verification": verify
     }))
 }
 
@@ -795,5 +855,37 @@ mod tests {
         assert!(merges.skipped[0].detail.contains("failed"));
         // Its worktree is left in place for inspection.
         assert!(Path::new(&report.agents[0].worktree_path).exists());
+    }
+
+    /// R31: the wave diff is each agent worktree's own changes, not the project tree.
+    #[test]
+    fn collect_wave_diff_gathers_agent_worktree_changes() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        std::fs::write(format!("{path}/secret.env"), "TOKEN=abc").unwrap();
+        std::fs::write(format!("{path}/README.md"), "x\nchanged\n").unwrap();
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "frontend".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(diff.contains("# frontend"), "agent header present");
+        assert!(diff.contains("secret.env"), "includes the agent's new file");
+        assert!(diff.contains("TOKEN=abc"), "includes the diff body");
+    }
+
+    #[test]
+    fn collect_wave_diff_empty_without_agents() {
+        assert!(collect_wave_diff(&WaveExecutionReport::default()).is_empty());
     }
 }

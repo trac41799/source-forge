@@ -1073,7 +1073,7 @@ fn find_jaccard_match<'a>(
         })
 }
 
-fn detect_and_record_contradictions(
+pub(crate) fn detect_and_record_contradictions(
     db: &Connection,
     new_items: &[KnowledgeItem],
     existing: &[KnowledgeItem],

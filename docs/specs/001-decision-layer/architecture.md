@@ -173,7 +173,7 @@ sequenceDiagram
 | 6 | Budget auto-sizing | `budget.rs::create_budget` | `choice` | ✅ `create_budget_cmd` | Derives complexity when caller omits it |
 | 7 | Failure confidence | `intelligence.rs::failure_confidence_decision` | `noul` | ✅ `diagnose_failure_cmd` | Real confidence vs hardcoded 0.0 |
 | 8 | Handoff verification | `handoff_parser.rs::semantic_handoff_confidence` | `noul` | ✅ `parse_handoff_file_cmd` (+review enqueue) | Semantic "did the work complete the task?" |
-| 9 | Deployment verification | `verification.rs::semantic_checks` | `noul`×2 | ✅ `verify_project_cmd` (R-7 feeds `collect_worktree_diff`) | Semantic README check atop deterministic checks |
+| 9 | Deployment verification | `verification.rs::semantic_checks` | `noul`×2 | ✅ `verify_and_finalize_wave_cmd` → `finalize_wave_with_verify` feeds the wave diff (R31) | README + secrets semantic checks atop deterministic checks |
 | 10 | Contradiction detection | `knowledge.rs::detect_and_record_contradictions` | `noul` | ✅ via `run_compounder_cmd` | Semantic contradiction vs Jaccard |
 | 11 | Knowledge merge confidence | `knowledge.rs::compound_knowledge` | `noul` | ✅ `compound_knowledge_cmd` | Real same-insight signal in merged confidence |
 | 12 | Backend health | `decision.rs::health_probe` | `noul` | ✅ `decision_health_cmd` | `healthy/degraded/offline`, no data egress |
@@ -246,13 +246,13 @@ Auth: `OPENROUTER_API_KEY` from env/vault, never logged/bundled.
 | R-4 | Med | Per-item calls (KG entities/relations, contradictions) → O(N)/O(N²) latency & cost | `kg_extraction.rs`, `knowledge.rs` | **FIXED** — `choose_batch`/`judge_batch` send all questions in one request (KG types+gate = 2, relations = 1, contradictions = 1 per item) |
 | R-5 | Med | Review enqueue not wired everywhere | `decision.rs::enqueue_review`, `routing.rs` | **FIXED** — routing + handoff (R-6) + contradiction review-band (`knowledge.rs`) all enqueue |
 | R-6 | Med | `semantic_handoff_confidence` unreachable | `handoff_parser.rs:114` | **FIXED** — wired into `parse_handoff_file_cmd` (+ review enqueue) |
-| R-7 | Med | R31 secrets `noul` inert — `verify_project_cmd` passes empty diff | `commands.rs` | **FIXED** — `verify_project_cmd` feeds `collect_worktree_diff` (`git diff HEAD`, 20k cap; empty for non-git) |
+| R-7 | Med | R31 secrets `noul` inert | `verification.rs` / `wave_executor.rs` | **FIXED (R31)** — semantic checks run on the wave path fed by `collect_wave_diff` (each agent worktree diff + untracked files); the project-tree diff was removed because R31's AC forbids it |
 | R-8 | Med | R7 "truncate" is enforced only for string state; structured state is rejected | `decision.rs` match arm | **FIXED (doc)** — R7 in `spec.md` now states structured `state` is rejected, not truncated |
 | R-9 | Low | `#[allow(dead_code)] mod decision;` masked not-yet-wired surface | `lib.rs` | **RESOLVED** — attribute removed; `decision.rs` emits zero dead-code warnings. Note: `choose_agent`/`choose_entity_type`/`choose_relation_type` are now uncalled library helpers (kept as public API) |
 | R-10 | Low | No circuit breaker / cost ceiling; repeated 502s pay full retries × N items | live 502 observed; `decision.rs` loop | **FIXED** — circuit breaker (5 fails → 30 s open, resets on success) + $5 spend cap; short-circuits with a failure row |
 | R-11 | Low | `score` passed through verbatim (doc says weighted average) | `decision.rs` normalize; `decision-contract.md` | **FIXED (doc)** — contract corrected to "pass-through"; consumers derive tiers |
 | R-12 | Low | Decisions are not replayable (inputs not stored) → no "pristine vs prod" determinism test | `decision_usage` schema | **FIXED (hash-only)** — `input_hash` (FNV-1a of state+questions) recorded via migration 020; raw `state` still never stored |
-| R-13 | Med | Unreachable integration points | §5 | **RESOLVED** — all 13 points reachable, 0 partial; #9 unblocked by R-7 |
+| R-13 | Med | Unreachable integration points | §5 | **RESOLVED** — all 13 points reachable, 0 partial; #9 now on the wave path (R31) |
 | R-14 | Med | Migration 016 failures are swallowed non-fatally while the layer hard-depends on the tables | `db.rs` | **FIXED** — `apply_migrations` calls `assert_decision_tables` and returns an error if any decision table is missing |
 | R-15 | Low | `decision_reviews` had no dedup/unique key → duplicates once enqueue is wired | `019_decision_reviews_unique.sql` | **FIXED** — migration 019 collapses existing duplicates then adds UNIQUE(consumer,question,decided_value); `INSERT OR IGNORE` reuses the existing id |
 | R-16 | Low | Verification thresholds were inconsistent (README `accept` vs secrets `review`) | `verification.rs` | **FIXED** — both use `policy_action`; review-band results also enqueue (`verification.readme` / `verification.secrets`) |
