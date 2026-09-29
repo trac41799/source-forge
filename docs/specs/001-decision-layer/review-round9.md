@@ -21,22 +21,27 @@ R51's AC unmet):
 ## Verified gates (factual)
 | Gate | Result |
 |---|---|
-| `cargo test` (MSVC) | **219 lib + 42 integration = 261 passed / 0 failed** |
-| `npm test` / `tsc` / `lint` | see PR |
+| `cargo test` (MSVC) | **222 lib + 42 integration = 264 passed / 0 failed** |
+| `npm test` / `tsc` / `lint` | 341 passed; tsc clean; 0 lint errors |
 | `pytest local-daemon/tests/test_router.py` | 28 passed |
 
 ## Honest notes
 - R51's tests cover the rows whose consumers expose the transport seam (core, deployment
   verify, KG typing, contradiction). Rows whose consumers build their transport/config from
-  the environment (outcome, budget, failure confidence, handoff, route_task, daemon) remain
-  covered by those modules' own unit tests — stated in the test-file header, not claimed as
-  covered here. `spec.md`'s AC says the same.
+  the environment (outcome, budget, failure confidence, handoff, route_task, daemon) rely on
+  their **implementation** fallbacks and are verified by inspection — **not** test-covered;
+  `spec.md`'s AC and the test-file header say the same.
 - R31's diff source is the agents' own worktrees (the wave's changes), which is what the AC wants;
-  untracked **and gitignored secret-named** files are included because secrets often land in new
-  files that `.gitignore` hides. Known limits: `git diff HEAD` misses changes an agent already
-  **committed**, and the collected diff (including secret-named file bodies) is **egressed** to the
-  configured backend to be judged — documented in `decision-contract.md §Privacy`.
-- Adversarial review (round 9) found and this PR fixed: unbounded diff accumulation (now bounded
-  incrementally), the `--exclude-standard` gap that dropped gitignored `.env` (now a targeted
-  ignored-secret pass), spurious secrets calls for change-free worktrees, symlink traversal, and
-  spec/coverage overstatement.
+  untracked **and gitignored secret-named** files are included (pathspec-limited) because secrets
+  often land in new files that `.gitignore` hides. Known limits: `git diff HEAD` misses changes an
+  agent already **committed**; the collected diff (including secret-named file bodies) is
+  **egressed** to the configured backend to be judged — documented in `decision-contract.md §Privacy`.
+- Accepted (not fixed): the wave-verify command runs blocking `git`/`ureq` on the async runtime
+  (same class as accepted risk R-2, and pre-existing for `verify_project`). A `spawn_blocking`
+  refactor is tracked with R-2, not here.
+
+## Adversarial review (round 9 — two passes)
+Fixed after review: unbounded diff accumulation (now streamed/bounded incrementally); the
+`--exclude-standard` gap that dropped gitignored `.env` (now a pathspec-limited ignored-secret
+pass); the file cap starving the secret filter (filter runs before the count); spurious secrets
+calls for change-free worktrees; symlink traversal; and spec/coverage overstatement.

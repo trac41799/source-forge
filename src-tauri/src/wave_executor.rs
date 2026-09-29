@@ -239,12 +239,45 @@ fn is_noise(path: &str) -> bool {
         .any(|n| path.starts_with(n) || path.contains(&format!("/{n}")) || path.contains(&format!("\\{n}")))
 }
 
+/// Gitignored files that may hold credentials, as recursive pathspecs so the
+/// listing stays small (a plain `--ignored` list can be tens of thousands of lines).
+const SECRET_PATHSPECS: &[&str] = &[
+    ":(glob)**/.env",
+    ":(glob)**/.env.*",
+    ":(glob)**/*.pem",
+    ":(glob)**/*.key",
+    ":(glob)**/*.p12",
+    ":(glob)**/*.pfx",
+    ":(glob)**/*.keystore",
+    ":(glob)**/*.jks",
+    ":(glob)**/*secret*",
+    ":(glob)**/*credential*",
+    ":(glob)**/id_rsa",
+    ":(glob)**/id_ed25519",
+];
+
+/// Append one file's (bounded) body to `body` unless it is a symlink / non-file / too big.
+fn append_file_body(body: &mut String, root: &std::path::Path, f: &str, per_file: usize) {
+    let p = root.join(f);
+    let Ok(meta) = std::fs::symlink_metadata(&p) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > (per_file as u64) * 4 {
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        body.push_str(&format!("\n# FILE {f}\n"));
+        body.extend(content.chars().take(per_file));
+    }
+}
+
 /// R31: collect the wave's **own** changes — each agent worktree's `git diff HEAD`
 /// plus untracked files (and *gitignored* files whose name looks secret-bearing,
 /// since `.gitignore` normally hides `.env`). Never the project source tree.
 ///
 /// Bounded: 20 000 chars overall, 4 096 chars per file body, ≤200 files per
-/// worktree, files >16 KiB skipped, symlinks skipped.
+/// worktree; the tracked diff is streamed and truncated, symlinks/large files are
+/// skipped, and the ignored listing is pathspec-limited.
 pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
     const CAP: usize = 20_000;
     const PER_FILE: usize = 4_096;
@@ -264,60 +297,60 @@ pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
         }
 
         let mut body = String::new();
-        // 1) tracked changes
-        if let Ok(o) = std::process::Command::new("git")
+        // 1) tracked changes — streamed so a huge diff never buffers fully.
+        if let Ok(mut child) = std::process::Command::new("git")
             .arg("-C")
             .arg(root)
             .args(["diff", "HEAD", "--no-color", "--unified=0"])
-            .output()
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
         {
-            if o.status.success() {
-                body.extend(String::from_utf8_lossy(&o.stdout).chars().take(CAP));
+            if let Some(stdout) = child.stdout.take() {
+                use std::io::Read;
+                let mut buf = Vec::with_capacity(4096);
+                let _ =
+                    std::io::BufReader::new(stdout).take(CAP as u64).read_to_end(&mut buf);
+                body.push_str(&String::from_utf8_lossy(&buf));
             }
+            let _ = child.wait();
         }
-        // 2) untracked files, then gitignored secret-bearing files
-        for ignored in [false, true] {
-            if body.chars().count() >= CAP {
-                break;
-            }
-            let mut args = vec!["ls-files", "--others", "--exclude-standard", "--"];
-            if ignored {
-                args = vec!["ls-files", "--others", "--ignored", "--exclude-standard", "--"];
-            }
+
+        // 2) untracked (non-ignored) files, then gitignored secret-named files.
+        // The secret filter runs BEFORE the MAX_FILES count so it can never be
+        // pushed out by unrelated ignored files.
+        let mut collected = 0usize;
+        let mut scan = |body: &mut String, collected: &mut usize, args: &[&str], secret_only: bool| {
             let Ok(o) = std::process::Command::new("git")
                 .arg("-C")
                 .arg(root)
-                .args(&args)
+                .args(args)
                 .output()
             else {
-                continue;
+                return;
             };
             if !o.status.success() {
-                continue;
+                return;
             }
-            for f in String::from_utf8_lossy(&o.stdout).lines().take(MAX_FILES) {
-                if body.chars().count() >= CAP {
+            for f in String::from_utf8_lossy(&o.stdout).lines() {
+                if body.chars().count() >= CAP || *collected >= MAX_FILES {
                     break;
                 }
-                if ignored && !looks_secret(f) {
+                if secret_only && !looks_secret(f) {
                     continue;
                 }
                 if is_noise(f) {
                     continue;
                 }
-                let p = root.join(f);
-                let Ok(meta) = std::fs::symlink_metadata(&p) else {
-                    continue;
-                };
-                if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > (PER_FILE as u64) * 4
-                {
-                    continue;
-                }
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    body.push_str(&format!("\n# FILE {f}\n"));
-                    body.extend(content.chars().take(PER_FILE));
-                }
+                *collected += 1;
+                append_file_body(body, root, f, PER_FILE);
             }
+        };
+        scan(&mut body, &mut collected, &["ls-files", "--others", "--exclude-standard", "--"], false);
+        if body.chars().count() < CAP && collected < MAX_FILES {
+            let mut args = vec!["ls-files", "--others", "--ignored", "--exclude-standard", "--"];
+            args.extend_from_slice(SECRET_PATHSPECS);
+            scan(&mut body, &mut collected, &args, true);
         }
 
         // Only emit an agent section when there is actually something to scan.
@@ -983,6 +1016,49 @@ mod tests {
     #[test]
     fn collect_wave_diff_empty_without_agents() {
         assert!(collect_wave_diff(&WaveExecutionReport::default()).is_empty());
+    }
+
+    /// Regression (review F1): a flood of ignored files must not push a secret
+    /// `.env` out of the scan.
+    #[test]
+    fn collect_wave_diff_finds_env_among_many_ignored_files() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        std::fs::write(format!("{path}/.gitignore"), ".env\n.cache/\n").unwrap();
+        std::fs::create_dir_all(format!("{path}/.cache")).unwrap();
+        for i in 0..250 {
+            std::fs::write(format!("{path}/.cache/f{i}.txt"), "x").unwrap();
+        }
+        std::fs::write(format!("{path}/.env"), "API_TOKEN=supersecret").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "gitignore"]);
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "a".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(
+            diff.contains("API_TOKEN=supersecret"),
+            "ignored .env must be found despite many ignored files"
+        );
     }
 
     /// A worktree with no changes must not emit a header (no spurious secrets call).

@@ -105,9 +105,9 @@ product's confidence numbers real.
 - **R31** WHEN deployment verification runs THEN semantic `noul` checks SHALL be added
   (README explains setup? secrets present in the **wave diff**?) **alongside** the
   deterministic checks. *AC:* the semantic secret check inspects the wave's collected
-  changes — each agent worktree's `git diff HEAD` plus untracked files (`collect_wave_diff`)
-  — never the project source tree; it runs on the wave path (`verify_and_finalize_wave_cmd`
-  → `finalize_wave_with_verify`).
+  changes — each agent worktree's `git diff HEAD` plus untracked files **and gitignored
+  secret-named files** (`collect_wave_diff`, bounded) — never the project source tree; it runs
+  on the wave path (`verify_and_finalize_wave_cmd` → `finalize_wave_with_verify`).
 
 ### E. Tier 4 — flywheel quality
 - **R40** WHEN two knowledge items are compared THEN same-insight/contradiction SHALL be
@@ -129,8 +129,10 @@ product's confidence numbers real.
   block an agent session. *AC:* the offline fallback matrix
   (`implementation-details/decision-contract.md`) is covered by
   `src-tauri/src/decision_fallback_tests.rs` for the transport-seam consumers (core,
-  deployment verify, KG typing, contradiction) and by the remaining consumers' module
-  unit tests; a fallback also records a `decision_usage` row (`policy_outcome='fallback'`).
+  deployment verify, KG typing, contradiction); the remaining rows (outcome, budget, failure
+  confidence, handoff, route_task, daemon) rely on their **implementation** fallbacks and are
+  verified by inspection, not tests; a fallback also records a `decision_usage` row
+  (`policy_outcome='fallback'`).
 - **R52** WHEN configuring backends THEN Settings SHALL allow hosted/local selection and
   display health. *AC:* health check = a live probe (empty `state`, one `noul` question
   "is this endpoint reachable") carrying no real data, or last success < 10 min; shows

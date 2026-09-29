@@ -3,8 +3,9 @@
 //! Rows verified here use the **injectable transport seam** — a transport that
 //! always errors stands in for "backend unavailable". Rows whose consumers build
 //! their own transport/config from the environment (outcome, budget, failure
-//! confidence, handoff, route_task, daemon router) are covered by those modules'
-//! own unit tests; the full matrix lives in
+//! confidence, handoff, route_task, daemon) are **not** test-covered here: they
+//! rely on their implementation fallbacks and are verified by inspection. The full
+//! matrix lives in
 //! `docs/specs/001-decision-layer/implementation-details/decision-contract.md`.
 
 use crate::decision::{DecisionConfig, DecisionError, DecisionTransport};
