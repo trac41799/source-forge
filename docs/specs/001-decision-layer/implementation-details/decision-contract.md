@@ -61,8 +61,10 @@ score levels.
 ## Normalization rules
 - `choice` → `value`; assert `value ∈ criteria`; probabilities **indexed by name**, never position.
 - `score` → `value` = probability-weighted average of levels (ordinal 0-based); keep
-  `legend` and raw `probabilities`. Tier mapping is the **consumer's** job (e.g. score
-  < 0.5 → low, < 1.5 → medium, else high) — never inferred from the number alone.
+  `legend` and raw `probabilities`. Jev already returns this weighted average in the wire
+  `score` field, so the adapter **passes it through** (verified live 2026-09-26:
+  probabilities `{0:0.62,1:0.38,2:0}` → `score 0.38`). Tier mapping is the **consumer's**
+  job (e.g. score < 0.5 → low, < 1.5 → medium, else high) — never inferred from the number alone.
 - `noul` → `value ∈ [0,1]`; **confidence is derived (`confidence = value`)** because the
   wire has no confidence for noul. Near 0.5 = uncertain → review band (R50).
 - `probability` sums asserted ≈ 1.0 (±0.001) for choice/score.
@@ -89,6 +91,11 @@ input_tokens, cost, truncated, created_at` — no `state` column.
 | **NanoJev** | local server | Qwen3-0.6B, batchable | high-volume embedded |
 | **SemIf** | CLI / lib | direct logits, Qwen3.5-4B | no-fine-tune experiments |
 | ~~djev / OpenJev~~ | — | image/multimodal/thinking | **not applicable** (text only) |
+
+> **Caveat — "swappable by config" means HTTP.** The adapter always speaks
+> `POST {base_url}/v1/systemone` over HTTP. Local projects that ship as a *library*
+> (e.g. `von-sdk`, `laya`) require a small serving shim (or their own server mode) to
+> expose that HTTP contract before they can be selected as a backend.
 
 ## Fallback matrix (R51) — verified line refs
 | Consumer | Fallback when backend unavailable |

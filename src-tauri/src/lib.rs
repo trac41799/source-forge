@@ -47,7 +47,6 @@ mod preferences;
 mod provisioner;
 mod arch_engine;
 mod delegation;
-#[allow(dead_code)] // M0: consumed by tests; wired into commands in M1
 mod decision;
 
 use commands::AppState;
@@ -66,7 +65,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .setup(|app| {
             let conn = db::init_db(app).expect("Failed to initialize database");
-            let app_state = AppState::new(conn);
+            let db_path = db::get_db_path(app);
+            let app_state = AppState::new(conn, db_path);
             let pty_arc_for_cron = app_state.pty_manager.clone();
             app.manage(app_state);
             events::set_app_handle(app.handle().clone());
@@ -176,8 +176,10 @@ pub fn run() {
             commands::check_github_actions_cmd,
             // Intelligence (Phase 3)
             commands::record_outcome_cmd,
+            commands::infer_outcome_cmd,
             commands::get_outcome_stats_cmd,
             commands::create_failure_analysis_cmd,
+            commands::diagnose_failure_cmd,
             commands::get_failure_analyses_cmd,
             commands::detect_limit_event_cmd,
             commands::record_limit_event_cmd,
@@ -236,6 +238,7 @@ pub fn run() {
             commands::update_knowledge_item_cmd,
             commands::delete_knowledge_item_cmd,
             commands::compound_knowledge_cmd,
+            commands::run_kg_extraction_cmd,
             commands::add_knowledge_relation_cmd,
             commands::get_knowledge_relations_cmd,
             commands::search_knowledge_cmd,

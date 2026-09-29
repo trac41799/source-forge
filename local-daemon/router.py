@@ -104,8 +104,69 @@ def parse_decision_response(payload: dict):
     return (None if choice == "none" else choice, confidence)
 
 
+# Defaults mirror the app's DecisionConfig (accept 0.75 / review 0.40).
+DECISION_ACCEPT_DEFAULT = 0.75
+DECISION_REVIEW_DEFAULT = 0.40
+
+
+def decision_thresholds() -> tuple[float, float]:
+    """R-3: (accept, review) thresholds, env-overridable so the daemon shares
+    the app's band instead of hard-coding its own behaviour."""
+
+    def _f(name: str, default: float) -> float:
+        try:
+            return float(os.environ.get(name, default))
+        except (TypeError, ValueError):
+            return default
+
+    return (
+        _f("DECISION_ACCEPT_THRESHOLD", DECISION_ACCEPT_DEFAULT),
+        _f("DECISION_REVIEW_THRESHOLD", DECISION_REVIEW_DEFAULT),
+    )
+
+
+def policy_action(confidence: float, accept: float, review: float) -> str:
+    """Mirror of the Tauri `policy_action`: 'apply' | 'review' | 'skip'."""
+    if confidence >= accept:
+        return "apply"
+    if confidence >= review:
+        return "review"
+    return "skip"
+
+
+def audit_decision(
+    consumer: str,
+    backend: str,
+    model: str,
+    chosen,
+    confidence: float,
+    policy_outcome: str,
+    latency_ms: float,
+) -> dict:
+    """R-3: emit a `decision_usage`-equivalent audit line for collection."""
+    record = {
+        "type": "decision_usage",
+        "consumer": consumer,
+        "backend": backend,
+        "model": model,
+        "chosen": chosen,
+        "confidence": round(float(confidence), 4),
+        "policy_outcome": policy_outcome,
+        "latency_ms": latency_ms,
+    }
+    logger.info("decision_usage %s", json.dumps(record, sort_keys=True))
+    return record
+
+
 async def route_with_decision(payload, project: dict):
-    """Route via the decision endpoint. Returns (agent_id|None, confidence) or None on failure."""
+    """Route via the decision endpoint. Returns (agent_id|None, confidence) or None on failure.
+
+    R-3: applies the accept/review band — only high-confidence (`apply`)
+    decisions are used; `review`/`skip` fall back to the prompt router — and
+    emits an audit record for every answered decision.
+    """
+    import time
+
     import httpx  # local import: tests need not have httpx installed
 
     agents = project.get("agents", [])
@@ -118,8 +179,9 @@ async def route_with_decision(payload, project: dict):
     if not key and not is_local:
         return None
 
+    model = os.environ.get("DECISION_MODEL", DECISION_MODEL_DEFAULT)
     body = {
-        "model": os.environ.get("DECISION_MODEL", DECISION_MODEL_DEFAULT),
+        "model": model,
         "state": {
             "message": payload.text,
             "sender": payload.sender_name,
@@ -130,14 +192,37 @@ async def route_with_decision(payload, project: dict):
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    started = time.perf_counter()
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(f"{base}/v1/systemone", json=body, headers=headers)
             resp.raise_for_status()
-            return parse_decision_response(resp.json())
+            parsed = parse_decision_response(resp.json())
     except Exception as e:
         logger.error("Decision router failed: %s", e)
         return None
+    latency_ms = round((time.perf_counter() - started) * 1000, 1)
+    if parsed is None:
+        return None
+
+    agent_id, confidence = parsed
+    accept, review = decision_thresholds()
+    action = policy_action(confidence, accept, review)
+    audit_decision(
+        consumer="daemon.router",
+        backend=base,
+        model=model,
+        chosen=agent_id,
+        confidence=confidence,
+        policy_outcome=action,
+        latency_ms=latency_ms,
+    )
+    if agent_id is None:
+        return (None, confidence)  # model explicitly chose "none"
+    if action == "apply":
+        return (agent_id, confidence)
+    # review/skip: too uncertain to trust → deterministic fallback.
+    return None
 
 
 async def route(

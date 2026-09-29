@@ -51,6 +51,36 @@ describe("intelligenceStore", () => {
     });
   });
 
+  it("inferOutcome calls the decision-based infer command", async () => {
+    mockInvoke.mockResolvedValueOnce(sampleRecord);
+    const result = await useIntelligenceStore
+      .getState()
+      .inferOutcome("s1", "agent-1", "review", "all tests passed", 5, 30);
+    expect(result).toEqual(sampleRecord);
+    expect(mockInvoke).toHaveBeenCalledWith("infer_outcome_cmd", {
+      sessionId: "s1",
+      agentId: "agent-1",
+      taskType: "review",
+      ptyOutput: "all tests passed",
+      idleSeconds: 5,
+      durationS: 30,
+    });
+  });
+
+  it("diagnoseFailure calls the decision-based diagnose command", async () => {
+    mockInvoke.mockResolvedValueOnce(0.8);
+    const confidence = await useIntelligenceStore
+      .getState()
+      .diagnoseFailure("fa-1", "null pointer", "missing check", "add null guard");
+    expect(confidence).toBe(0.8);
+    expect(mockInvoke).toHaveBeenCalledWith("diagnose_failure_cmd", {
+      analysisId: "fa-1",
+      diagnosis: "null pointer",
+      rootCause: "missing check",
+      suggestedFix: "add null guard",
+    });
+  });
+
   it("getOutcomeStats updates state from invoke", async () => {
     mockInvoke.mockResolvedValueOnce(sampleStats);
     await useIntelligenceStore.getState().getOutcomeStats();

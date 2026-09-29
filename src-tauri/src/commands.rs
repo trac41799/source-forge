@@ -34,22 +34,20 @@ use crate::memory;
 pub struct AppState {
     pub pty_manager: Arc<PtyManager>,
     pub db: Arc<Mutex<Connection>>,
+    /// R-1: path used to open an independent connection for network-holding
+    /// commands (see `db::open_aux`).
+    pub db_path: std::path::PathBuf,
     pub current_project_path: Mutex<Option<String>>,
     pub memory_circuit_breaker: Mutex<memory::CircuitBreaker>,
     pub memory_anti_thrashing: Mutex<HashMap<String, (i64, bool)>>,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new(Connection::open(":memory:").unwrap())
-    }
-}
-
 impl AppState {
-    pub fn new(db: Connection) -> Self {
+    pub fn new(db: Connection, db_path: std::path::PathBuf) -> Self {
         Self {
             pty_manager: Arc::new(PtyManager::new()),
             db: Arc::new(Mutex::new(db)),
+            db_path,
             current_project_path: Mutex::new(None),
             memory_circuit_breaker: Mutex::new(memory::CircuitBreaker::new()),
             memory_anti_thrashing: Mutex::new(HashMap::new()),
@@ -145,11 +143,32 @@ pub async fn list_worktrees_cmd(
     worktree::list_worktrees(&repo_path)
 }
 
-#[tauri::command]
-pub async fn parse_handoff_file_cmd(
+#[tauri::command(async)]
+pub fn parse_handoff_file_cmd(
+    state: State<'_, AppState>,
     path: String,
 ) -> Result<handoff_parser::HandoffEnvelope, String> {
-    handoff_parser::parse_handoff_file(std::path::Path::new(&path))
+    let env = handoff_parser::parse_handoff_file(std::path::Path::new(&path))?;
+    // M3 (spec R30): semantic confidence; a review-band handoff is enqueued.
+    // R-1: independent connection — semantic confidence does network I/O.
+    if let Ok(db) = crate::db::open_aux(&state.db_path) {
+        if let Some(p) = handoff_parser::semantic_handoff_confidence(&db, &env) {
+            let cfg = crate::decision::get_decision_config(&db).unwrap_or_default();
+            if crate::decision::policy_action(&cfg, p) == crate::decision::PolicyAction::Review {
+                let payload = serde_json::json!({ "raw_path": env.raw_path, "confidence": p })
+                    .to_string();
+                let _ = crate::decision::enqueue_review(
+                    &db,
+                    "handoff",
+                    "completion",
+                    &env.completed_by,
+                    p,
+                    &payload,
+                );
+            }
+        }
+    }
+    Ok(env)
 }
 
 #[tauri::command]
@@ -441,6 +460,25 @@ pub async fn record_outcome_cmd(
     intelligence::record_outcome(&db, &session_id, &agent_id, &task_type, &outcome, duration_s)
 }
 
+/// M2 (spec R21): infer the outcome via the decision layer (keyword fallback),
+/// then record it — makes `suggest_outcome_decision` reachable.
+#[tauri::command(async)]
+pub fn infer_outcome_cmd(
+    state: State<'_, AppState>,
+    session_id: String,
+    agent_id: String,
+    task_type: String,
+    pty_output: String,
+    idle_seconds: u64,
+    duration_s: f64,
+) -> Result<intelligence::OutcomeRecord, String> {
+    // R-1: independent connection — `suggest_outcome_decision` hits the network.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
+    let outcome = intelligence::suggest_outcome_decision(&db, &pty_output, idle_seconds)
+        .unwrap_or_else(|| "stalled".to_string());
+    intelligence::record_outcome(&db, &session_id, &agent_id, &task_type, &outcome, duration_s)
+}
+
 #[tauri::command]
 pub async fn get_outcome_stats_cmd(
     state: State<'_, AppState>,
@@ -451,14 +489,40 @@ pub async fn get_outcome_stats_cmd(
     intelligence::get_outcome_stats(&db, project_id.as_deref(), agent_id.as_deref())
 }
 
-#[tauri::command]
-pub async fn create_failure_analysis_cmd(
+#[tauri::command(async)]
+pub fn create_failure_analysis_cmd(
     state: State<'_, AppState>,
     session_id: String,
     pty_excerpt: String,
 ) -> Result<intelligence::FailureAnalysis, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — failure analysis consults the decision layer.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     intelligence::create_failure_analysis(&db, &session_id, &pty_excerpt)
+}
+
+/// M2 (spec R23): compute a decision-derived confidence and persist the diagnosis —
+/// makes `failure_confidence_decision` + `update_failure_diagnosis` reachable.
+#[tauri::command(async)]
+pub fn diagnose_failure_cmd(
+    state: State<'_, AppState>,
+    analysis_id: String,
+    diagnosis: String,
+    root_cause: String,
+    suggested_fix: String,
+) -> Result<f64, String> {
+    // R-1: independent connection — `failure_confidence_decision` hits the network.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
+    let confidence =
+        intelligence::failure_confidence_decision(&db, &diagnosis, &root_cause, &suggested_fix);
+    intelligence::update_failure_diagnosis(
+        &db,
+        &analysis_id,
+        &diagnosis,
+        &root_cause,
+        &suggested_fix,
+        confidence,
+    )?;
+    Ok(confidence)
 }
 
 #[tauri::command]
@@ -545,9 +609,10 @@ pub async fn run_heartbeat_check_cmd(
 // Phase 4: Routing Commands
 // ============================================================================
 
-#[tauri::command]
-pub async fn route_task_cmd(state: State<'_, AppState>, task_desc: String, task_type: String, project_id: Option<String>) -> Result<Vec<routing::TaskSuggestion>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+#[tauri::command(async)]
+pub fn route_task_cmd(state: State<'_, AppState>, task_desc: String, task_type: String, project_id: Option<String>) -> Result<Vec<routing::TaskSuggestion>, String> {
+    // R-1: independent connection — `route_task` ranks via the decision layer.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     routing::route_task(&db, &task_desc, &task_type, project_id.as_deref())
 }
 
@@ -688,8 +753,8 @@ pub async fn seed_wave_from_spec_cmd(
 
 // ── Deployment Verification Phase (Wave 5) ───────────────────────────
 
-#[tauri::command]
-pub async fn verify_project_cmd(
+#[tauri::command(async)]
+pub fn verify_project_cmd(
     project_path: String,
     state: State<'_, AppState>,
 ) -> Result<crate::verification::VerificationReport, String> {
@@ -698,8 +763,11 @@ pub async fn verify_project_cmd(
     let mut report = crate::verification::verify_project(p);
     // M3 (spec R31): additive semantic checks when a decision backend is configured.
     let readme = std::fs::read_to_string(p.join("README.md")).ok();
-    if let Ok(db) = state.db.lock() {
-        let semantic = crate::verification::semantic_checks(&db, readme.as_deref(), "");
+    // R-7: feed the worktree diff so the semantic secrets check actually runs.
+    let wave_diff = crate::verification::collect_worktree_diff(&project_path);
+    // R-1: independent connection — semantic checks call the decision layer.
+    if let Ok(db) = crate::db::open_aux(&state.db_path) {
+        let semantic = crate::verification::semantic_checks(&db, readme.as_deref(), &wave_diff);
         report.extend_with(semantic);
     }
     Ok(report)
@@ -786,9 +854,10 @@ pub async fn set_decision_config_cmd(
     crate::decision::set_decision_config(&db, &config)
 }
 
-#[tauri::command]
-pub async fn decision_health_cmd(state: State<'_, AppState>) -> Result<String, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+#[tauri::command(async)]
+pub fn decision_health_cmd(state: State<'_, AppState>) -> Result<String, String> {
+    // R-1: independent connection — the probe performs an HTTP round-trip.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     let cfg = crate::decision::get_decision_config(&db)?;
     let key = std::env::var("OPENROUTER_API_KEY").ok();
     let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
@@ -1143,7 +1212,8 @@ pub async fn create_budget_cmd(
     state: State<'_, AppState>,
     input: budget::BudgetInput,
 ) -> Result<budget::AgentBudget, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — `create_budget` calls `choose_complexity` (HTTP).
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     budget::create_budget(&db, &input)
 }
 
@@ -1305,12 +1375,37 @@ pub async fn delete_knowledge_item_cmd(
     knowledge::delete_knowledge_item(&db, &id)
 }
 
+/// R-13 (#3): LLM entity/relation extraction persisted with decision-layer typing.
+/// The caller supplies the session events + diffs.
+#[tauri::command(async)]
+pub fn run_kg_extraction_cmd(
+    state: State<'_, AppState>,
+    session_events: String,
+    code_diffs: String,
+    session_id: Option<String>,
+    project_id: Option<String>,
+) -> Result<(usize, usize), String> {
+    let api_key = std::env::var("OPENROUTER_API_KEY")
+        .map_err(|_| "OPENROUTER_API_KEY not set".to_string())?;
+    let result =
+        crate::kg_extraction::run_llm_extraction_blocking(&session_events, &code_diffs, &api_key)?;
+    // R-1: independent connection — the extraction above blocked on HTTP.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
+    crate::kg_extraction::persist_extraction(
+        &db,
+        &result,
+        session_id.as_deref(),
+        project_id.as_deref(),
+    )
+}
+
 #[tauri::command]
 pub async fn compound_knowledge_cmd(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<knowledge::KnowledgeItem>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — `compound_knowledge` re-tags via the decision layer (HTTP).
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     knowledge::compound_knowledge(&db, project_id.as_deref())
 }
 

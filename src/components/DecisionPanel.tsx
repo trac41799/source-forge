@@ -107,6 +107,19 @@ export function DecisionPanel() {
         </label>
       </div>
 
+      <label className="block text-xs text-muted-foreground">
+        Base URL{" "}
+        <span className="text-muted-foreground/60">
+          (required for a local backend; must not be the hosted URL)
+        </span>
+        <input
+          aria-label="decision-base-url"
+          value={config.base_url}
+          onChange={(e) => setConfig({ ...config, base_url: e.target.value })}
+          className="mt-1 w-full rounded bg-muted px-2 py-1 font-mono text-xs text-foreground"
+        />
+      </label>
+
       <button
         onClick={save}
         className="rounded bg-primary px-3 py-1 text-xs text-primary-foreground"

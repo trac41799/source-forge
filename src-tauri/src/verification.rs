@@ -73,6 +73,29 @@ impl VerificationReport {
     }
 }
 
+/// Best-effort worktree diff for the semantic secrets check (R-7). Returns an
+/// empty string when the path is not a git repository or `git` is unavailable,
+/// so the deterministic checks stay unaffected.
+pub fn collect_worktree_diff(project_path: &str) -> String {
+    if !std::path::Path::new(project_path).join(".git").exists() {
+        return String::new();
+    }
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(project_path)
+        .args(["diff", "HEAD", "--no-color", "--unified=0"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .chars()
+                .take(20_000)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// M3 (spec R31): additive semantic checks via the decision layer. Returns an
 /// empty vec when no backend is configured (deterministic checks are unaffected).
 pub fn semantic_checks(
@@ -86,28 +109,56 @@ pub fn semantic_checks(
         return Vec::new();
     }
     let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+    semantic_checks_with(&cfg, &transport, key.as_deref(), db, readme, wave_diff)
+}
+
+/// R-16: testable core — the transport is injected. Review-band results enqueue a
+/// `decision_reviews` row (consistent with routing/handoff/contradiction).
+pub fn semantic_checks_with(
+    cfg: &crate::decision::DecisionConfig,
+    transport: &dyn crate::decision::DecisionTransport,
+    key: Option<&str>,
+    db: &rusqlite::Connection,
+    readme: Option<&str>,
+    wave_diff: &str,
+) -> Vec<BuildCheck> {
+    use crate::decision::{policy_action, PolicyAction};
     let mut out = Vec::new();
 
     if let Some(rd) = readme {
         if let Ok(Some(p)) = crate::decision::judge(
-            &cfg,
-            &transport,
-            key.as_deref(),
+            cfg,
+            transport,
+            key,
             &serde_json::json!(rd),
             "Does this README explain how to set up and run the project?",
             "explains",
             Some(db),
         ) {
+            let action = policy_action(cfg, p);
+            if action == PolicyAction::Review {
+                let _ = crate::decision::enqueue_review(
+                    db,
+                    "verification.readme",
+                    "explains",
+                    "README.md",
+                    p,
+                    &serde_json::json!({ "confidence": p }).to_string(),
+                );
+            }
+            let status = match action {
+                PolicyAction::Apply => CheckStatus::Pass,
+                PolicyAction::Review => {
+                    CheckStatus::Skip(format!("needs review (confidence {p:.2})"))
+                }
+                PolicyAction::Skip => CheckStatus::Fail(format!(
+                    "semantic confidence {p:.2} below review {:.2}",
+                    cfg.review_threshold
+                )),
+            };
             out.push(BuildCheck {
                 name: "README explains setup (semantic)".into(),
-                status: if p >= cfg.accept_threshold {
-                    CheckStatus::Pass
-                } else {
-                    CheckStatus::Fail(format!(
-                        "semantic confidence {p:.2} < accept {:.2}",
-                        cfg.accept_threshold
-                    ))
-                },
+                status,
                 detail: format!("confidence {p:.2}"),
             });
         }
@@ -115,21 +166,38 @@ pub fn semantic_checks(
 
     if !wave_diff.is_empty() {
         if let Ok(Some(p)) = crate::decision::judge(
-            &cfg,
-            &transport,
-            key.as_deref(),
+            cfg,
+            transport,
+            key,
             &serde_json::json!({ "diff": wave_diff }),
             "Does this diff introduce hardcoded secrets or credentials?",
             "has_secrets",
             Some(db),
         ) {
+            // p = probability that secrets ARE present.
+            let action = policy_action(cfg, p);
+            if action == PolicyAction::Review {
+                let _ = crate::decision::enqueue_review(
+                    db,
+                    "verification.secrets",
+                    "has_secrets",
+                    "diff",
+                    p,
+                    &serde_json::json!({ "confidence": p }).to_string(),
+                );
+            }
+            let status = match action {
+                PolicyAction::Apply => CheckStatus::Fail(format!(
+                    "secret exposure confidence {p:.2}"
+                )),
+                PolicyAction::Review => {
+                    CheckStatus::Skip(format!("secret check needs review (confidence {p:.2})"))
+                }
+                PolicyAction::Skip => CheckStatus::Pass,
+            };
             out.push(BuildCheck {
                 name: "No secrets in diff (semantic)".into(),
-                status: if p < cfg.review_threshold {
-                    CheckStatus::Pass
-                } else {
-                    CheckStatus::Fail(format!("secret exposure confidence {p:.2}"))
-                },
+                status,
                 detail: format!("has_secrets confidence {p:.2}"),
             });
         }
@@ -1229,5 +1297,62 @@ mod tests {
         assert_eq!(report.total, 3);
         assert_eq!(report.passed_count, 1);
         assert!(!report.passed);
+    }
+
+    // ── R-7: worktree diff feeds the semantic secrets check ──────────────
+    #[test]
+    fn collect_worktree_diff_empty_for_non_git_dir() {
+        let dir = std::env::temp_dir().join(format!("acc-nogit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let diff = collect_worktree_diff(&dir.to_string_lossy());
+        assert!(diff.is_empty(), "non-git dir must yield an empty diff");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── R-16: verification review-band enqueue ─────────────────────────────
+    struct SemTransport {
+        payload: serde_json::Value,
+    }
+    impl crate::decision::DecisionTransport for SemTransport {
+        fn post(
+            &self,
+            _url: &str,
+            _key: Option<&str>,
+            _body: &serde_json::Value,
+        ) -> Result<serde_json::Value, crate::decision::DecisionError> {
+            Ok(self.payload.clone())
+        }
+    }
+
+    #[test]
+    fn review_band_readme_enqueues_review() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/016_decision_usage.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/019_decision_reviews_unique.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/020_decision_usage_hash.sql"))
+            .unwrap();
+        let cfg = crate::decision::DecisionConfig::default();
+        let t = SemTransport {
+            payload: serde_json::json!({
+                "model": "m",
+                "answers": { "explains": { "type": "noul", "noul": 0.5 } },
+                "usage": { "input_tokens": 1, "cost": 0.0 }
+            }),
+        };
+        let checks = semantic_checks_with(&cfg, &t, Some("k"), &conn, Some("readme body"), "");
+        assert!(
+            checks.iter().any(|c| matches!(c.status, CheckStatus::Skip(_))),
+            "review band → skip status"
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM decision_reviews WHERE consumer = 'verification.readme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "review-band README check enqueues a review");
     }
 }

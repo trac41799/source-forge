@@ -815,7 +815,10 @@ pub fn compounder_merge(
         }
     }
 
-    let _ = detect_and_record_contradictions(db, &out, &existing);
+    let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
+    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
+    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
+    let _ = detect_and_record_contradictions(db, &out, &existing, &dec_transport, dec_key.as_deref());
 
     Ok(out)
 }
@@ -1074,11 +1077,11 @@ fn detect_and_record_contradictions(
     db: &Connection,
     new_items: &[KnowledgeItem],
     existing: &[KnowledgeItem],
+    transport: &dyn crate::decision::DecisionTransport,
+    api_key: Option<&str>,
 ) -> Result<usize, String> {
     let mut recorded = 0usize;
     let dec_cfg = crate::decision::get_decision_config(db).unwrap_or_default();
-    let dec_transport = crate::decision::UreqTransport { timeout_ms: dec_cfg.timeout_ms };
-    let dec_key = std::env::var("OPENROUTER_API_KEY").ok();
     let antipattern_indicators = ["avoid", "don't", "do not", "never", "bug", "wrong", "bad"];
 
     for new_item in new_items {
@@ -1094,28 +1097,51 @@ fn detect_and_record_contradictions(
             continue;
         }
 
-        for ex in existing {
-            if ex.id == new_item.id || ex.status != "active" {
-                continue;
-            }
-            if ex.r#type == "pattern" || ex.r#type == "convention" {
-                let ex_text =
-                    format!("{} {}", ex.title, ex.content).to_lowercase();
-                // M4 (spec R40): decide "contradicts" via noul; Jaccard is the fallback.
-                let is_contradiction = match crate::decision::judge(
-                    &dec_cfg,
-                    &dec_transport,
-                    dec_key.as_deref(),
-                    &serde_json::json!({
-                        "a": format!("{} {}", new_item.title, new_item.content),
-                        "b": format!("{} {}", ex.title, ex.content),
-                    }),
-                    "Do `a` and `b` contradict each other?",
-                    "contradicts",
-                    Some(db),
-                ) {
-                    Ok(Some(p)) => p >= dec_cfg.review_threshold,
-                    _ => jaccard_similarity(&new_text, &ex_text) >= 0.5,
+        // R-4: batch every candidate comparison for this item into one request.
+        let candidates: Vec<&KnowledgeItem> = existing
+            .iter()
+            .filter(|ex| {
+                ex.id != new_item.id
+                    && ex.status == "active"
+                    && (ex.r#type == "pattern" || ex.r#type == "convention")
+            })
+            .collect();
+        if candidates.is_empty() {
+            continue;
+        }
+        let state = serde_json::json!({
+            "new": format!("{} {}", new_item.title, new_item.content),
+            "candidates": candidates
+                .iter()
+                .map(|ex| format!("{} {}", ex.title, ex.content))
+                .collect::<Vec<_>>(),
+        });
+        let qs: Vec<(String, String)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(i, _)| {
+                (
+                    format!("contradicts_{i}"),
+                    "Do the 'new' item and this candidate contradict each other?".to_string(),
+                )
+            })
+            .collect();
+        // M4 (spec R40): decide "contradicts" via noul; Jaccard is the fallback.
+        let probs =
+            crate::decision::judge_batch(&dec_cfg, transport, api_key, &state, &qs, Some(db)).ok();
+
+        for (i, ex) in candidates.iter().enumerate() {
+            {
+                let ex_text = format!("{} {}", ex.title, ex.content).to_lowercase();
+                let (is_contradiction, review_band) = match probs
+                    .as_ref()
+                    .and_then(|m| m.get(&format!("contradicts_{i}")).copied())
+                {
+                    Some(p) => (
+                        p >= dec_cfg.review_threshold,
+                        Some((p, crate::decision::policy_action(&dec_cfg, p))),
+                    ),
+                    None => (jaccard_similarity(&new_text, &ex_text) >= 0.5, None),
                 };
                 if is_contradiction {
                     let now = chrono::Utc::now().to_rfc3339();
@@ -1125,6 +1151,22 @@ fn detect_and_record_contradictions(
                     );
                     if res.is_ok() {
                         recorded += 1;
+                    }
+                    // R-5: a contradiction the model is unsure about also goes to the
+                    // human review queue (routing already enqueues in the review band).
+                    if let Some((p, crate::decision::PolicyAction::Review)) = review_band {
+                        let _ = crate::decision::enqueue_review(
+                            db,
+                            "knowledge.contradiction",
+                            "Do `a` and `b` contradict each other?",
+                            "contradicts",
+                            p,
+                            &serde_json::json!({
+                                "new_id": new_item.id,
+                                "existing_id": ex.id,
+                            })
+                            .to_string(),
+                        );
                     }
                 }
             }
@@ -1166,4 +1208,112 @@ pub fn get_preflight_warnings(
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(items)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn db_with_events() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE events (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                timestamp TEXT,
+                event_type TEXT,
+                target TEXT,
+                lines_added INTEGER,
+                lines_removed INTEGER
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// R-13 (#2): an empty session short-circuits before any LLM call.
+    #[test]
+    fn compounder_prepare_prompt_empty_session_returns_none() {
+        let conn = db_with_events();
+        let prompt = compounder_prepare_prompt(&conn, "s-empty").unwrap();
+        assert!(prompt.is_none());
+    }
+
+    struct FixedTransport {
+        payload: serde_json::Value,
+    }
+    impl crate::decision::DecisionTransport for FixedTransport {
+        fn post(
+            &self,
+            _url: &str,
+            _key: Option<&str>,
+            _body: &serde_json::Value,
+        ) -> Result<serde_json::Value, crate::decision::DecisionError> {
+            Ok(self.payload.clone())
+        }
+    }
+
+    fn item(id: &str, ty: &str, title: &str, content: &str) -> KnowledgeItem {
+        KnowledgeItem {
+            id: id.into(),
+            r#type: ty.into(),
+            title: title.into(),
+            content: content.into(),
+            tags: None,
+            stack_tags: None,
+            agent_tags: None,
+            project_id: None,
+            session_ids: None,
+            plan_ids: None,
+            confidence: 1.0,
+            confirmation_count: 1,
+            is_global: false,
+            first_seen: "2026-01-01T00:00:00Z".into(),
+            last_confirmed: "2026-01-01T00:00:00Z".into(),
+            status: "active".into(),
+            pending_task_data: None,
+        }
+    }
+
+    /// R-5: a contradiction the model is unsure about (review band) must be
+    /// recorded *and* enqueued for human review.
+    #[test]
+    fn contradiction_in_review_band_enqueues_review() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(concat!(include_str!("../migrations/016_decision_usage.sql"), "\n", include_str!("../migrations/020_decision_usage_hash.sql")))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/019_decision_reviews_unique.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE knowledge_relations (
+                from_id TEXT, to_id TEXT, relation_type TEXT, created_at TEXT,
+                trigram_tag TEXT, hexagram_tag TEXT, wuxing_cycle TEXT,
+                bagua_confidence REAL, relation_multivector TEXT,
+                PRIMARY KEY (from_id, to_id, relation_type)
+            );",
+        )
+        .unwrap();
+
+        let t = FixedTransport {
+            payload: serde_json::json!({
+                "model": "m",
+                "answers": { "contradicts_0": { "type": "noul", "noul": 0.5 } },
+                "usage": { "input_tokens": 1, "cost": 0.0 }
+            }),
+        };
+        let new_item = item("n1", "antipattern", "Avoid X", "do not use X");
+        let existing = vec![item("e1", "pattern", "Use X", "prefer X here")];
+        let recorded =
+            detect_and_record_contradictions(&conn, &[new_item], &existing, &t, Some("k")).unwrap();
+        assert_eq!(recorded, 1, "0.5 >= review 0.40 → contradiction recorded");
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM decision_reviews WHERE consumer = 'knowledge.contradiction'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "review-band contradiction must enqueue a review");
+    }
 }

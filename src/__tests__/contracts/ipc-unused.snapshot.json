@@ -25,6 +25,7 @@
   "record_subagent_token_usage_cmd",
   "release_all_for_thread_cmd",
   "release_file_cmd",
+  "run_kg_extraction_cmd",
   "scaffold_project_cmd",
   "seed_wave_from_spec_cmd",
   "set_project_path",

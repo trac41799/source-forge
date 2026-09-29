@@ -58,14 +58,18 @@ product's confidence numbers real.
 - **R6** WHEN a key is required THEN it SHALL come from env/vault and SHALL NOT appear in
   source, logs, or client bundles. *AC:* hosted key = `OPENROUTER_API_KEY` (Rust and
   daemon alike); no secret and no `state` appear in any log line or serialized payload.
-- **R7** WHEN `state` exceeds the configured backend context limit THEN it SHALL be
+- **R7** WHEN a **string** `state` exceeds the configured backend context limit THEN it SHALL be
   truncated client-side before sending. *AC:* limit = `decision.context_limit` tokens
   (default 32000, matching OpenRouter; TypeSafe allows 64k total = 32k state + longest
   question); token estimate = `ceil(chars/4)`; a truncated call sets `truncated=1`.
+  **Structured (object/array) `state` is never silently truncated — an oversized structured
+  `state` is rejected with a validation error** (mutilating JSON mid-key is unsafe; R-8).
 - **R8** WHEN a decision in the review band belongs to a consumer with a review path
   THEN the system SHALL enqueue a `decision_reviews` row (decided value, confidence,
-  consumer, created_at, resolved). *AC:* a review-band routing decision creates exactly
-  one review row and is not auto-applied. (UI in M5; the table + enqueue are foundation.)
+  consumer, created_at, resolved). *AC:* a review-band **routing** decision creates
+  exactly one review row; handoff and contradiction review-band decisions also enqueue
+  (R-5/R-6); duplicate `(consumer, question, decided_value)` reviews are deduplicated
+  (migration 019, R-15).
 
 ### B. Tier 1 — replace brittle classification
 - **R10** WHEN an inbound chat message is routed THEN the agent SHALL be a `choice` over
@@ -108,14 +112,16 @@ product's confidence numbers real.
   a `noul` and the relation type a `choice`. *AC:* replaces the current
   `jaccard_similarity >= 0.5` heuristic (`knowledge.rs:1008,1036`); fallback retains it.
 - **R41** WHEN items merge THEN confidence SHALL be decision-derived, not the fabricated
-  recency-weighted value (`knowledge.rs:341`). *AC:* merged item confidence equals the
-  decision confidence (or fallback formula when backend unavailable).
+  recency-weighted value alone (`knowledge.rs:341`). *AC:* merged-item confidence is a
+  50/50 blend of the decision same-insight probability and the recency heuristic; the
+  recency-only formula is used when the backend is unavailable.
 
 ### F. Policy & cross-cutting
 - **R50** IF confidence falls in the review band AND the consumer has a review path
-  (routing, handoff, contradiction) THEN the system SHALL enqueue review rather than act;
-  consumers without a review path SHALL fall back (R51). *AC:* band = [review_threshold,
-  accept_threshold); default [0.40, 0.75); a routing decision at 0.5 is enqueued, not applied.
+  THEN the system SHALL enqueue review rather than act silently; consumers without a
+  review path SHALL fall back (R51). *AC:* band = [review_threshold, accept_threshold);
+  default [0.40, 0.75); a routing decision at 0.5 is enqueued to `decision_reviews`.
+  (Wired sites: routing, handoff (R-6), contradiction (R-5), verification (R-16).)
 - **R51** WHEN no backend is available (offline, timeout, no model) THEN each consumer
   SHALL fall back to its documented prior behavior and record the degradation — never
   block an agent session. *AC:* the offline fallback matrix
@@ -137,6 +143,18 @@ product's confidence numbers real.
 5. Local model not downloaded → R51 fallback + surfaced in R52 health (owner T37/T38).
 6. Offline with a local backend and model present → must succeed (constitution §4).
 7. Noul near 0.5 → treated as uncertain; review band catches it (R50).
+
+## Delivery status (2026-09-26)
+Reachability is authoritative in `architecture.md §5`.
+
+| State | Requirements |
+|---|---|
+| **Delivered (reachable)** | R1–R8, R10–R12, R20–R23, R30, R40, R41, R50, R52, R53 |
+| **Partial** | none |
+| **Deferred** | none — all integration points wired (`architecture.md §5`); all High risks mitigated (`review-round7.md`) |
+
+Deferred items are tracked as R-13 in `architecture.md §8`; no requirement above is claimed
+as delivered unless its caller is reachable from a registered command or the daemon.
 
 ## Out of scope
 - djev / OpenJev (image/multimodal inputs — n/a).
