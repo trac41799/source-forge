@@ -198,3 +198,17 @@ pub async fn get_build_app_status_cmd(
     let db = state.db.lock().map_err(|e| e.to_string())?;
     pipeline_store::get_run(&db, &run_id)
 }
+
+/// The run currently in flight (or paused awaiting the user) for a project path.
+///
+/// `build_app_cmd` only returns when the pipeline finishes, so the UI cannot
+/// learn the `run_id` in time to offer Cancel/Resume. This exposes the active
+/// run so a long build can be cancelled or retried from the app.
+#[tauri::command]
+pub async fn get_active_build_run_cmd(
+    state: State<'_, AppState>,
+    project_path: String,
+) -> Result<Option<BuildRun>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    pipeline_store::find_resumable_run(&db, &project_path)
+}

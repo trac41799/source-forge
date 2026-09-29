@@ -1,5 +1,4 @@
 [
-  "cancel_build_app_cmd",
   "check_cli_cmd",
   "claim_file_cmd",
   "create_delegation_report_cmd",
@@ -26,7 +25,6 @@
   "record_subagent_token_usage_cmd",
   "release_all_for_thread_cmd",
   "release_file_cmd",
-  "resume_build_app_cmd",
   "scaffold_project_cmd",
   "seed_wave_from_spec_cmd",
   "set_project_path",

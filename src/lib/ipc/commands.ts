@@ -34,6 +34,7 @@ export const IPC = {
   resumeBuildApp: "resume_build_app_cmd",
   cancelBuildApp: "cancel_build_app_cmd",
   getBuildAppStatus: "get_build_app_status_cmd",
+  getActiveBuildRun: "get_active_build_run_cmd",
 
   // Decision layer
   getDecisionConfig: "get_decision_config_cmd",

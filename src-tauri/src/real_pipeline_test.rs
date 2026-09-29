@@ -110,8 +110,8 @@ fn make_fixture_repo() -> tempfile::TempDir {
     dir
 }
 
-/// The spec paragraph becomes the step objective, which the guideline carries
-/// into the agent prompt (together with the exact HANDOFF filename).
+/// Two independent steps → two agents running concurrently in their own
+/// worktrees (exercises the parallel wave model, not just a single agent).
 fn make_spec(dir: &Path) -> String {
     let path = dir.join("real-plan.md");
     let body = "# Plan\n\n\
@@ -120,6 +120,11 @@ fn make_spec(dir: &Path) -> String {
         **Wave:** A \u{00b7} **Depends on:** \u{2014}\n\
         Create a file named src/greeting.ts in this repository that exports \
         `export function greet(name: string): string { return `Hello ${name}`; }` \
+        as dependency-free TypeScript.\n\n\
+        ### Step 1.2: Add a farewell module\n\
+        **Wave:** A \u{00b7} **Depends on:** \u{2014}\n\
+        Create a file named src/farewell.ts in this repository that exports \
+        `export function farewell(name: string): string { return `Bye ${name}`; }` \
         as dependency-free TypeScript.\n";
     std::fs::write(&path, body).unwrap();
     path.to_string_lossy().to_string()

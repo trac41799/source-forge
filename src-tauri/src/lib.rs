@@ -247,6 +247,7 @@ pub fn run() {
             pipeline_commands::resume_build_app_cmd,
             pipeline_commands::cancel_build_app_cmd,
             pipeline_commands::get_build_app_status_cmd,
+            pipeline_commands::get_active_build_run_cmd,
             // Knowledge Graph Commands
             commands::kg_local_search_cmd,
             commands::kg_global_search_cmd,
