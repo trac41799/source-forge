@@ -139,17 +139,43 @@ pub async fn resume_build_app_cmd(
         return Err(format!("Run {run_id} is already {}", run.status));
     }
 
+    // Reuse the options the run was started with (persisted in the report's
+    // artifacts) so a resume behaves the same instead of silently reverting to
+    // defaults — e.g. losing a pinned agent or a raised timeout (M12).
+    let artifacts = run
+        .report
+        .as_ref()
+        .and_then(|report| report.get("artifacts"))
+        .cloned()
+        .unwrap_or_default();
+    let str_opt = |key: &str, fallback: &str| {
+        artifacts
+            .get(key)
+            .and_then(|value| value.as_str())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+
     let opts = PipelineOptions {
         run_id: run.id.clone(),
         project_id: run.project_id.clone(),
         spec_path: run.spec_path.clone(),
         project_path: run.project_path.clone(),
         stack_id: run.stack_id.clone(),
-        agent_command: "opencode".to_string(),
-        base_branch: "main".to_string(),
-        allow_deploy_on_failed_verification: false,
-        generate_dockerfile: true,
-        agent_timeout_secs: 300,
+        agent_command: str_opt("agent_command", "opencode"),
+        base_branch: str_opt("base_branch", "main"),
+        allow_deploy_on_failed_verification: artifacts
+            .get("allow_deploy_on_failed_verification")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        generate_dockerfile: artifacts
+            .get("generate_dockerfile")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(true),
+        agent_timeout_secs: artifacts
+            .get("agent_timeout_secs")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(300),
     };
 
     run_on_blocking_thread(app, state.db.clone(), opts).await

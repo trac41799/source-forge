@@ -4,9 +4,9 @@
 //
 // After agents are spawned, the supervisor polls each agent's worktree for a
 // valid HANDOFF_<agent_ref>.md:
-//   - valid handoff            â†’ agent done
-//   - deadline / cost cap      â†’ kill, optional single retry, then correction doc
-//   - cancellation requested   â†’ kill and stop
+//   - valid handoff            → agent done
+//   - deadline / cost cap      → kill, optional single retry, then correction doc
+//   - cancellation requested   → kill and stop
 //
 // Kill/respawn are abstracted behind `AgentControl` so tests run without PTYs.
 
@@ -42,6 +42,11 @@ pub trait AgentControl: Send + Sync {
     fn kill(&self, agent: &AgentExecution) -> Result<(), String>;
     /// Respawn a failed agent; returns the new session id.
     fn respawn(&self, agent: &AgentExecution) -> Result<String, String>;
+    /// Whether the agent's process is still alive. Returning `true` means
+    /// "unknown", so the supervisor falls back to the deadline.
+    fn is_running(&self, _agent: &AgentExecution) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -65,6 +70,7 @@ fn handoff_path(agent: &AgentExecution) -> std::path::PathBuf {
 fn wait_for_handoff(
     agent: &AgentExecution,
     config: &SupervisionConfig,
+    control: &dyn AgentControl,
     cancel_check: &dyn Fn() -> bool,
 ) -> WaitResult {
     let path = handoff_path(agent);
@@ -85,6 +91,12 @@ fn wait_for_handoff(
             return WaitResult::Done;
         }
 
+        // The process exited without a valid handoff: fail now rather than
+        // idling until the deadline (retry logic treats this like a timeout).
+        if !control.is_running(agent) {
+            return WaitResult::Timeout("agent exited without a valid handoff");
+        }
+
         if Instant::now() >= deadline {
             return WaitResult::Timeout("deadline exceeded");
         }
@@ -100,7 +112,7 @@ fn record_correction(db: &Mutex<Connection>, plan_id: &str, agent: &AgentExecuti
         plan_id,
         &agent.agent_ref,
         reason,
-        "Agent did not produce a valid handoff before the deadline",
+        "Agent did not produce a valid handoff ({reason})",
         "Re-run the task and ensure HANDOFF_<agent>.md is written with all required sections",
         "Validate the handoff with handoff_parser before completion",
         agent.retry_count,
@@ -124,7 +136,7 @@ pub fn supervise_agents(
         }
 
         loop {
-            match wait_for_handoff(agent, config, cancel_check) {
+            match wait_for_handoff(agent, config, control, cancel_check) {
                 WaitResult::Done => {
                     agent.status = "done".to_string();
                     outcome.done += 1;
@@ -304,7 +316,7 @@ mod tests {
     #[test]
     fn test_supervisor_ignores_incomplete_handoff_then_fails() {
         let dir = TempDir::new().unwrap();
-        // Missing required sections â†’ not a valid handoff.
+        // Missing required sections → not a valid handoff.
         std::fs::write(dir.path().join("HANDOFF_1-1.md"), "# HANDOFF\nJust some text\n").unwrap();
 
         let db = Mutex::new(setup_db());
@@ -384,6 +396,56 @@ mod tests {
         assert_eq!(
             *control.kills.lock().unwrap(),
             vec!["sess-1".to_string()]
+        );
+    }
+
+    struct DeadControl {
+        kills: Mutex<Vec<String>>,
+    }
+
+    impl AgentControl for DeadControl {
+        fn kill(&self, agent: &AgentExecution) -> Result<(), String> {
+            self.kills.lock().unwrap().push(agent.session_id.clone());
+            Ok(())
+        }
+
+        fn respawn(&self, _agent: &AgentExecution) -> Result<String, String> {
+            Err("respawn not expected".to_string())
+        }
+
+        fn is_running(&self, _agent: &AgentExecution) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn test_exited_agent_fails_fast_instead_of_waiting_for_deadline() {
+        // Process gone and no handoff: the supervisor must not idle for the
+        // whole timeout (the real acceptance run burned every attempt's full
+        // budget that way, because the agent had already exited).
+        let dir = TempDir::new().unwrap();
+        let db = Mutex::new(setup_db());
+        let control = DeadControl {
+            kills: Mutex::new(Vec::new()),
+        };
+        let mut wave = report(agent(dir.path()));
+
+        let config = SupervisionConfig {
+            timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_retries: 0,
+            cost_cap_usd: None,
+        };
+
+        let started = Instant::now();
+        let outcome = supervise_agents(&db, &mut wave, &config, &control, &no_cancel).unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(outcome.failed, 1);
+        assert_eq!(wave.agents[0].status, "failed");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "must fail fast when the process exited, took {elapsed:?}"
         );
     }
 }

@@ -7,12 +7,16 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-/// Create a new git worktree at `worktree_path` with a new branch `branch`
-/// based on `base_branch`. Returns the canonical path to the new worktree.
+/// Create a git worktree at `worktree_path` with a new branch `branch` based on
+/// `base_branch`. Returns the canonical path to the new worktree.
+///
+/// Idempotent for resume: if `branch` already exists (a previous attempt) the
+/// existing branch is reused instead of erroring, and a worktree that is
+/// already checked out at `worktree_path` is returned as-is. Without this,
+/// resuming a run always failed with "Branch already exists".
 ///
 /// # Errors
 /// - If `repo_path` is not a git repository
-/// - If `branch` already exists
 /// - If `git worktree add` fails for any other reason
 pub fn create_worktree(
     repo_path: &str,
@@ -32,7 +36,23 @@ pub fn create_worktree(
         .map_err(|e| format!("Failed to check branch: {}", e))?;
 
     if branch_check.status.success() {
-        return Err(format!("Branch already exists: {}", branch));
+        // Resume path: the branch exists, so re-attach to it (no `-b`).
+        let status = Command::new("git")
+            .args(["-C", repo_path, "worktree", "add", worktree_path, branch])
+            .status()
+            .map_err(|e| format!("git worktree add failed to start: {}", e))?;
+
+        if !status.success() {
+            // Already registered at this path? Then there is nothing to do.
+            if Path::new(worktree_path).join(".git").exists() {
+                return Ok(PathBuf::from(worktree_path));
+            }
+            return Err(format!(
+                "git worktree add (existing branch {branch}) exited with {:?}",
+                status.code()
+            ));
+        }
+        return Ok(PathBuf::from(worktree_path));
     }
 
     // Create the worktree with a new branch based on base_branch
@@ -136,7 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_worktree_duplicate_branch() {
+    fn test_create_worktree_duplicate_branch_is_reused_on_resume() {
         let repo = create_test_repo();
         let repo_path = repo.path().to_str().unwrap();
         let wt1 = repo.path().join("wt1").to_str().unwrap().to_string();
@@ -144,11 +164,25 @@ mod tests {
         // First creation should succeed
         create_worktree(repo_path, "dup-branch", &wt1, "main").expect("first create");
 
-        // Second creation with same branch should fail
-        let wt2 = repo.path().join("wt2").to_str().unwrap().to_string();
-        let result = create_worktree(repo_path, "dup-branch", &wt2, "main");
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("Branch already exists"));
+        // Re-entering the same run (same branch + same path) must be Ok rather
+        // than "already exists" — this is what resume hits every time.
+        let again = create_worktree(repo_path, "dup-branch", &wt1, "main");
+        assert!(
+            again.is_ok(),
+            "resume must be idempotent, got {:?}",
+            again.err()
+        );
+
+        // After cleanup removed the worktree, the surviving branch is re-attached
+        // at the same path (also a resume path).
+        remove_worktree(repo_path, &wt1).expect("remove");
+        let after_cleanup = create_worktree(repo_path, "dup-branch", &wt1, "main");
+        assert!(
+            after_cleanup.is_ok(),
+            "re-attach after cleanup must work, got {:?}",
+            after_cleanup.err()
+        );
+        assert!(Path::new(&wt1).join(".git").exists(), "worktree attached");
     }
 
     #[test]

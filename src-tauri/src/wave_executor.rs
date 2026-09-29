@@ -300,15 +300,19 @@ pub async fn execute_wave_with_adapters(
             &config.agent_base_args,
         )?;
 
-        // 5c. Spawn via adapter. The guideline (which carries the task, the
-        // repo conventions and the exact HANDOFF_<agent_ref>.md filename) is the
-        // prompt — passing only `agent.task` left the agent unaware it had to
-        // write a handoff, so the first attempt could never satisfy the
-        // supervisor.
-        let task_prompt = std::fs::read_to_string(&guideline_path)
-            .ok()
-            .filter(|content| !content.trim().is_empty())
-            .unwrap_or_else(|| agent.task.clone());
+        // Prompt with a short, constant pointer to the guideline file instead of
+        // inlining its content. The guideline carries spec-derived text, and on
+        // Windows agents are launched through `cmd /C`, where arbitrary text in
+        // an argument is a command-injection vector (and can exceed the
+        // command-line length limit for large specs). Reading `.acc/GUIDELINE.md`
+        // is the phrasing proven to work in the dogfood probe.
+        let task_prompt = if guideline_path.exists() {
+            "Implement the task described in .acc/GUIDELINE.md in this worktree, \
+             then write the HANDOFF file it names in the repository root."
+                .to_string()
+        } else {
+            agent.task.clone()
+        };
         let session = adapter.spawn(&task_prompt, &worktree_path)?;
 
         report.agents.push(AgentExecution {

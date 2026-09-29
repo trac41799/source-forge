@@ -43,7 +43,7 @@ function App() {
           }
         }
       } catch {
-        // First launch â€” no snapshot exists
+        // First launch — no snapshot exists
       }
     })();
 

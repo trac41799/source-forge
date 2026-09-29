@@ -120,8 +120,8 @@ export function DecisionPanel() {
           {reviews.map((r) => (
             <li key={r.id} className="flex items-center justify-between gap-2">
               <span>
-                {r.consumer}: {r.decided_value ?? "â€”"} (
-                {r.confidence != null ? r.confidence.toFixed(2) : "â€”"})
+                {r.consumer}: {r.decided_value ?? "—"} (
+                {r.confidence != null ? r.confidence.toFixed(2) : "—"})
               </span>
               {!r.resolved && (
                 <button onClick={() => resolve(r.id)} className="text-[10px] underline">

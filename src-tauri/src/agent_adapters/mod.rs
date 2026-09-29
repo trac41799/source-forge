@@ -37,6 +37,16 @@ pub trait AgentAdapter: Send + Sync {
     
     /// Parse cost information from agent output
     fn parse_cost(&self, output: &str) -> Option<f64>;
+
+    /// Whether the session's process is still running.
+    ///
+    /// Adapters that cannot tell must return `true`: the supervisor then falls
+    /// back to the deadline. Adapters that *can* tell let the supervisor fail
+    /// fast when an agent exits without writing a handoff, instead of idling
+    /// until the timeout.
+    fn is_running(&self, _session: &AgentSession) -> bool {
+        true
+    }
 }
 
 /// Mock adapter for testing

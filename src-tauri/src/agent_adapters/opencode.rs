@@ -27,6 +27,8 @@ impl ProcessHandle {
 pub struct OpenCodeAdapter {
     binary_path: String,
     processes: Arc<Mutex<HashMap<String, ProcessHandle>>>,
+    /// Sessions whose process has exited (its output streams reached EOF).
+    finished: Arc<std::sync::Mutex<std::collections::HashSet<String>>>,
 }
 
 impl OpenCodeAdapter {
@@ -34,6 +36,7 @@ impl OpenCodeAdapter {
         Self {
             binary_path: "opencode".to_string(),
             processes: Arc::new(Mutex::new(HashMap::new())),
+            finished: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 
@@ -41,6 +44,7 @@ impl OpenCodeAdapter {
         Self {
             binary_path: path,
             processes: Arc::new(Mutex::new(HashMap::new())),
+            finished: Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         }
     }
 }
@@ -120,10 +124,16 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stdout) = child.stdout.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
+            let finished = self.finished.clone();
             tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] {}", session_id_clone, line));
+                }
+                // EOF: the process exited. Lets the supervisor fail fast
+                // instead of polling until the deadline.
+                if let Ok(mut set) = finished.lock() {
+                    set.insert(session_id_clone);
                 }
             });
         }
@@ -132,10 +142,14 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stderr) = child.stderr.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
+            let finished = self.finished.clone();
             tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] [stderr] {}", session_id_clone, line));
+                }
+                if let Ok(mut set) = finished.lock() {
+                    set.insert(session_id_clone);
                 }
             });
         }
@@ -173,6 +187,14 @@ impl AgentAdapter for OpenCodeAdapter {
         });
 
         Ok(())
+    }
+
+    fn is_running(&self, session: &AgentSession) -> bool {
+        !self
+            .finished
+            .lock()
+            .map(|set| set.contains(&session.id))
+            .unwrap_or(false)
     }
 
     fn stream_output(&self, session: &AgentSession) -> Result<Vec<String>, String> {
