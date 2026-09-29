@@ -42,6 +42,8 @@ export const IPC = {
   decisionHealth: "decision_health_cmd",
   listDecisionReviews: "list_decision_reviews_cmd",
   resolveDecisionReview: "resolve_decision_review_cmd",
+  inferOutcome: "infer_outcome_cmd",
+  diagnoseFailure: "diagnose_failure_cmd",
 
   // Skills / project
   checkSkillbridge: "check_skillbridge",

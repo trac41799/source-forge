@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
+import { IPC } from "../lib/ipc/commands";
 
 export interface OutcomeRecord {
   id: string;
@@ -111,7 +112,7 @@ export const useIntelligenceStore = create<IntelligenceStore>((set) => ({
   },
 
   inferOutcome: async (sessionId, agentId, taskType, ptyOutput, idleSeconds, durationS) => {
-    return await invoke<OutcomeRecord>("infer_outcome_cmd", {
+    return await invoke<OutcomeRecord>(IPC.inferOutcome, {
       sessionId,
       agentId,
       taskType,
@@ -133,7 +134,7 @@ export const useIntelligenceStore = create<IntelligenceStore>((set) => ({
   },
 
   diagnoseFailure: async (analysisId, diagnosis, rootCause, suggestedFix) => {
-    return await invoke<number>("diagnose_failure_cmd", {
+    return await invoke<number>(IPC.diagnoseFailure, {
       analysisId,
       diagnosis,
       rootCause,
