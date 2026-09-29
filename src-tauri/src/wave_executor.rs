@@ -242,18 +242,17 @@ fn is_noise(path: &str) -> bool {
 /// Gitignored files that may hold credentials, as recursive pathspecs so the
 /// listing stays small (a plain `--ignored` list can be tens of thousands of lines).
 const SECRET_PATHSPECS: &[&str] = &[
-    ":(glob)**/.env",
-    ":(glob)**/.env.*",
-    ":(glob)**/*.pem",
-    ":(glob)**/*.key",
-    ":(glob)**/*.p12",
-    ":(glob)**/*.pfx",
-    ":(glob)**/*.keystore",
-    ":(glob)**/*.jks",
-    ":(glob)**/*secret*",
-    ":(glob)**/*credential*",
-    ":(glob)**/id_rsa",
-    ":(glob)**/id_ed25519",
+    ":(glob,icase)**/.env*",
+    ":(glob,icase)**/*.pem",
+    ":(glob,icase)**/*.key",
+    ":(glob,icase)**/*.p12",
+    ":(glob,icase)**/*.pfx",
+    ":(glob,icase)**/*.keystore",
+    ":(glob,icase)**/*.jks",
+    ":(glob,icase)**/*secret*",
+    ":(glob,icase)**/*credential*",
+    ":(glob,icase)**/id_rsa",
+    ":(glob,icase)**/id_ed25519",
 ];
 
 /// Append one file's (bounded) body to `body` unless it is a symlink / non-file / too big.
@@ -320,7 +319,7 @@ pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
         // The secret filter runs BEFORE the MAX_FILES count so it can never be
         // pushed out by unrelated ignored files.
         let mut collected = 0usize;
-        let mut scan = |body: &mut String, collected: &mut usize, args: &[&str], secret_only: bool| {
+        let scan = |body: &mut String, collected: &mut usize, args: &[&str], secret_only: bool| {
             let Ok(o) = std::process::Command::new("git")
                 .arg("-C")
                 .arg(root)
@@ -346,11 +345,19 @@ pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
                 append_file_body(body, root, f, PER_FILE);
             }
         };
-        scan(&mut body, &mut collected, &["ls-files", "--others", "--exclude-standard", "--"], false);
-        if body.chars().count() < CAP && collected < MAX_FILES {
+        // Secrets FIRST: a flood of untracked files must not starve the secret scan.
+        {
             let mut args = vec!["ls-files", "--others", "--ignored", "--exclude-standard", "--"];
             args.extend_from_slice(SECRET_PATHSPECS);
             scan(&mut body, &mut collected, &args, true);
+        }
+        if body.chars().count() < CAP && collected < MAX_FILES {
+            scan(
+                &mut body,
+                &mut collected,
+                &["ls-files", "--others", "--exclude-standard", "--"],
+                false,
+            );
         }
 
         // Only emit an agent section when there is actually something to scan.
@@ -1059,6 +1066,44 @@ mod tests {
             diff.contains("API_TOKEN=supersecret"),
             "ignored .env must be found despite many ignored files"
         );
+    }
+
+    /// Regression (review): case variants and `.envrc` must be found — the
+    /// pathspec is case-insensitive and matches `.env*`.
+    #[test]
+    fn collect_wave_diff_finds_case_and_envrc_secrets() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        std::fs::write(format!("{path}/.gitignore"), ".envrc\n.ENV\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "gitignore"]);
+        std::fs::write(format!("{path}/.envrc"), "export DIRENV_TOKEN=abc").unwrap();
+        std::fs::write(format!("{path}/.ENV"), "API_TOKEN=xyz").unwrap();
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "a".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(diff.contains("DIRENV_TOKEN=abc"), ".envrc must be collected");
+        assert!(diff.contains("API_TOKEN=xyz"), "case-variant .ENV must be collected");
     }
 
     /// A worktree with no changes must not emit a header (no spurious secrets call).
