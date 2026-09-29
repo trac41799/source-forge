@@ -70,7 +70,7 @@ fn w(base: &Path, rel: &str, content: &str, r: &mut ScaffoldReport) -> Result<()
 fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut ScaffoldReport) -> Result<(), String> {
     let pkg = serde_json::json!({
         "name": name, "version": "0.1.0", "private": true,
-        "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint" },
+        "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint", "typecheck": "tsc --noEmit", "test": "node --test tests", "postinstall": "prisma generate" },
         "dependencies": { "next": "^14.2.0", "react": "^18.3.0", "react-dom": "^18.3.0", "@prisma/client": "^5.15.0", "@supabase/supabase-js": "^2.43.0", "zod": "^3.23.0" },
         "devDependencies": { "typescript": "^5.5.0", "@types/node": "^20.14.0", "@types/react": "^18.3.0", "@types/react-dom": "^18.3.0", "prisma": "^5.15.0", "tailwindcss": "^3.4.0", "postcss": "^8.4.0", "autoprefixer": "^10.4.0" }
     });
@@ -81,16 +81,26 @@ fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut Scaffol
     w(base, "postcss.config.js", "module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n", r)?;
 
     let prov = if stack.id.contains("supabase") { "postgresql" } else { "postgresql" };
-    w(base, "prisma/schema.prisma", &format!("generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider = \"{prov}\"\n  url      = env(\"DATABASE_URL\")\n}}\n"), r)?;
+    // A model is required: `prisma generate` exits 1 on a model-less schema
+    // ("You don't have any models defined"), which broke `npm install`
+    // (postinstall) and therefore the whole build for every scaffolded app.
+    w(base, "prisma/schema.prisma", &format!("generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider = \"{prov}\"\n  url      = env(\"DATABASE_URL\")\n}}\n\nmodel User {{\n  id        String   @id @default(cuid())\n  email     String   @unique\n  name      String?\n  createdAt DateTime @default(now())\n}}\n"), r)?;
 
     w(base, "app/layout.tsx", &format!("import type {{ Metadata }} from 'next';\nimport './globals.css';\nexport const metadata: Metadata = {{ title: '{name}' }};\nexport default function RootLayout({{ children }}: {{ children: React.ReactNode }}) {{\n  return (<html lang=\"en\"><body>{{children}}</body></html>);\n}}\n"), r)?;
     w(base, "app/globals.css", "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n", r)?;
     w(base, "app/page.tsx", &format!("export default function Home() {{\n  return (<main className=\"flex min-h-screen items-center justify-center\"><h1 className=\"text-4xl font-bold\">Welcome to {name}</h1></main>);\n}}\n"), r)?;
-    w(base, "app/api/health/route.ts", "import {{ NextResponse }} from 'next/server';\nexport async function GET() {{\n  return NextResponse.json({{ status: 'ok', timestamp: new Date().toISOString() }});\n}}\n", r)?;
-    w(base, "lib/prisma.ts", "import {{ PrismaClient }} from '@prisma/client';\nconst g = globalThis as unknown as {{ prisma: PrismaClient }};\nexport const prisma = g.prisma || new PrismaClient();\nif (process.env.NODE_ENV !== 'production') g.prisma = prisma;\n", r)?;
-    w(base, "lib/supabase.ts", "import {{ createClient }} from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
-    w(base, ".env.example", "# Database\nDATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n", r)?;
+    w(base, "app/api/health/route.ts", "import { NextResponse } from 'next/server';\nexport async function GET() {\n  return NextResponse.json({ status: 'ok', timestamp: new Date().toISOString() });\n}\n", r)?;
+    w(base, "lib/prisma.ts", "import { PrismaClient } from '@prisma/client';\nconst g = globalThis as unknown as { prisma: PrismaClient };\nexport const prisma = g.prisma || new PrismaClient();\nif (process.env.NODE_ENV !== 'production') g.prisma = prisma;\n", r)?;
+    w(base, "lib/supabase.ts", "import { createClient } from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
+    w(base, ".env.example", "# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database\nDATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n", r)?;
     w(base, ".gitignore", "node_modules/\n.next/\ndist/\n.env\n.env.local\n*.db\n", r)?;
+    w(
+        base,
+        "tests/scaffold.test.mjs",
+        "import test from 'node:test';\nimport assert from 'node:assert/strict';\nimport { existsSync, readFileSync } from 'node:fs';\nimport { fileURLToPath } from 'node:url';\n\nconst read = (rel) => readFileSync(fileURLToPath(new URL(rel, import.meta.url)), 'utf8');\n\ntest('scaffold defines a build script', () => {\n  const pkg = JSON.parse(read('../package.json'));\n  assert.ok(pkg.scripts.build, 'package.json must define a build script');\n});\n\ntest('scaffold ships the health route', () => {\n  assert.ok(existsSync(fileURLToPath(new URL('../app/api/health/route.ts', import.meta.url))));\n});\n",
+        r,
+    )?;
+
     r.next_steps.push("4. Run: npx prisma generate".into());
     r.next_steps.push("5. Set DATABASE_URL + Supabase keys in .env".into());
     Ok(())
@@ -137,6 +147,37 @@ mod tests {
         assert!(Path::new(&p).join("app/page.tsx").exists());
         assert!(Path::new(&p).join("app/api/health/route.ts").exists());
         assert!(Path::new(&p).join("prisma/schema.prisma").exists());
+    }
+
+    #[test]
+    fn test_scaffold_output_is_buildable_typescript() {
+        // Two defects found by the from-empty acceptance run, both of which made
+        // every scaffolded Next.js app fail `tsc` and `next build`:
+        //  - `{{`/`}}` written literally into plain (non-`format!`) strings;
+        //  - a Prisma schema with no models, so `prisma generate` exits 1.
+        let (_d, p) = tp();
+        let report = scaffold_project("nextjs-prisma-vercel", &p, "na").unwrap();
+        assert!(!report.files_created.is_empty());
+        for rel in &report.files_created {
+            if !rel.ends_with(".ts") && !rel.ends_with(".tsx") && !rel.ends_with(".mjs") {
+                continue;
+            }
+            let content = std::fs::read_to_string(Path::new(&p).join(rel)).unwrap();
+            assert!(!content.contains("{{"), "{rel} contains doubled braces");
+            assert!(!content.contains("}}"), "{rel} contains doubled braces");
+        }
+
+        let schema =
+            std::fs::read_to_string(Path::new(&p).join("prisma/schema.prisma")).unwrap();
+        assert!(
+            schema.contains("model "),
+            "prisma generate needs at least one model"
+        );
+
+        let pkg = std::fs::read_to_string(Path::new(&p).join("package.json")).unwrap();
+        for script in ["typecheck", "test", "postinstall"] {
+            assert!(pkg.contains(&format!("\"{script}\"")), "package.json must define {script}");
+        }
     }
 
     #[test]
