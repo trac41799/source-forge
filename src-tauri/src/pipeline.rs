@@ -2,8 +2,8 @@
 //
 // Supervised build pipeline (SPEC-001 §5 DG-1).
 //
-//   parse_spec â†’ resolve_stack â†’ provision â†’ scaffold â†’ seed_plan
-//   â†’ execute_waves â†’ finalize_and_verify â†’ deploy â†’ report
+//   parse_spec → resolve_stack → provision → scaffold → seed_plan
+//   → execute_waves → finalize_and_verify → deploy → report
 //
 // The pipeline is synchronous by design: it runs inside
 // `tauri::async_runtime::spawn_blocking` from `pipeline_commands.rs`, and the
@@ -222,6 +222,18 @@ impl crate::wave_supervisor::AgentControl for AdapterWaveRunner {
         adapter.kill(&session)
     }
 
+    fn is_running(&self, agent: &AgentExecution) -> bool {
+        match self.registry.get(&self.agent_command) {
+            Some(adapter) => adapter.is_running(&crate::agent_adapters::AgentSession {
+                id: agent.session_id.clone(),
+                agent_id: self.agent_command.clone(),
+                worktree: agent.worktree_path.clone(),
+                started_at: chrono::Utc::now(),
+            }),
+            None => true,
+        }
+    }
+
     fn respawn(&self, agent: &AgentExecution) -> Result<String, String> {
         let adapter = self
             .registry
@@ -417,6 +429,37 @@ pub fn run_pipeline(
         }
     }
 
+    // A run whose agents never produced a valid handoff is NOT a success, even
+    // when the project happens to satisfy verification (e.g. it already passed
+    // before the agents ran). Pause instead of overclaiming: the operator can
+    // resume (retry) or cancel.
+    if let Some(wave) = &state.wave_report {
+        let incomplete = incomplete_agents(wave);
+        if !incomplete.is_empty() {
+            let detail = incomplete
+                .iter()
+                .map(|(agent, status)| format!("{agent}={status}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let message = format!("{} agent(s) did not complete: {detail}", incomplete.len());
+            report.status = pipeline_store::STATUS_AWAITING_USER.to_string();
+            report.error = Some(message.clone());
+            finalize_report(db, opts, &mut report, &state)?;
+            {
+                let conn = lock(db)?;
+                pipeline_store::set_error(&conn, &opts.run_id, &message)?;
+                pipeline_store::update_status(
+                    &conn,
+                    &opts.run_id,
+                    pipeline_store::STATUS_AWAITING_USER,
+                    Some("report"),
+                )?;
+            }
+            adapters.event_sink.emit("report", "agents_incomplete", &message);
+            return Ok(report);
+        }
+    }
+
     // A run whose verification failed is NOT a success, even though the only
     // stage it affects (deploy) was skipped rather than failed.
     let verification_failed = state
@@ -472,6 +515,13 @@ fn finalize_report(
     report.artifacts = serde_json::json!({
         "project_path": opts.project_path,
         "spec_path": opts.spec_path,
+        // The effective options are persisted so a resume reproduces the run
+        // instead of silently falling back to defaults (M12).
+        "agent_command": opts.agent_command,
+        "base_branch": opts.base_branch,
+        "allow_deploy_on_failed_verification": opts.allow_deploy_on_failed_verification,
+        "generate_dockerfile": opts.generate_dockerfile,
+        "agent_timeout_secs": opts.agent_timeout_secs,
     });
 
     let conn = lock(db)?;
@@ -507,7 +557,7 @@ fn stage_parse_spec(
     let tasks = crate::spec_parser::parse_gap_closure_plan(&content);
     if tasks.is_empty() {
         return Err(format!(
-            "No tasks parsed from spec '{}' â€” expected '## Phase N' + '### Step X.Y' headers",
+            "No tasks parsed from spec '{}' — expected '## Phase N' + '### Step X.Y' headers",
             opts.spec_path
         ));
     }
@@ -584,7 +634,7 @@ fn stage_provision(
     if !missing_mcp.is_empty() {
         delegation.add_task(
             "provision-supabase",
-            "Connect Supabase MCP (Integrations â†’ Supabase) so migrations can be applied",
+            "Connect Supabase MCP (Integrations → Supabase) so migrations can be applied",
             "Stack requires a Supabase database",
         );
     }
@@ -875,6 +925,17 @@ fn compound_session(
     Ok(items.len())
 }
 
+/// Agents that did not finish with a valid handoff, as `(agent_ref, status)`.
+/// A non-empty result means the promised work was not done.
+fn incomplete_agents(report: &crate::wave_executor::WaveExecutionReport) -> Vec<(String, String)> {
+    report
+        .agents
+        .iter()
+        .filter(|agent| agent.status != "done")
+        .map(|agent| (agent.agent_ref.clone(), agent.status.clone()))
+        .collect()
+}
+
 fn stage_deploy(
     opts: &PipelineOptions,
     adapters: &PipelineAdapters,
@@ -895,16 +956,36 @@ fn stage_deploy(
 
     if !verification_passed && !opts.allow_deploy_on_failed_verification {
         return Ok(StageResult::Skipped(
-            "verification failed â€” deploy skipped (override with allow_deploy_on_failed_verification)"
+            "verification failed — deploy skipped (override with allow_deploy_on_failed_verification)"
                 .to_string(),
         ));
+    }
+
+    // A wave whose agents never completed would deploy nothing (or whatever
+    // happened to be in the worktree), so gate it like a failed verification
+    // instead of pushing a half-done project to production.
+    if !opts.allow_deploy_on_failed_verification {
+        if let Some(wave) = &state.wave_report {
+            let incomplete = incomplete_agents(wave);
+            if !incomplete.is_empty() {
+                let detail = incomplete
+                    .iter()
+                    .map(|(agent, status)| format!("{agent}={status}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                return Ok(StageResult::Skipped(format!(
+                    "{} agent(s) did not complete ({detail}) — deploy skipped",
+                    incomplete.len()
+                )));
+            }
+        }
     }
 
     let outcome = adapters
         .deployer
         .deploy(Path::new(&opts.project_path), &stack_id)?;
 
-    // Dockerfile artifact for non-Vercel hosts (§6.1) â€” never executed in v1.
+    // Dockerfile artifact for non-Vercel hosts (§6.1) — never executed in v1.
     let dockerfile = if opts.generate_dockerfile {
         crate::deployer::write_dockerfile(Path::new(&opts.project_path), &stack_id)?
     } else {
@@ -914,7 +995,7 @@ fn stage_deploy(
     let url = outcome.url.clone().unwrap_or_else(|| "(no url)".to_string());
     state.deploy = Some(outcome);
     Ok(StageResult::Done(format!(
-        "deployed via {} â†’ {url}{}",
+        "deployed via {} → {url}{}",
         state
             .deploy
             .as_ref()
@@ -1018,7 +1099,7 @@ mod tests {
         let path = dir.path().join("plan.md");
         std::fs::write(
             &path,
-            "# Plan\n\n## Phase 1: Build\n\n### Step 1.1: Do the thing\n**Wave:** A · **Depends on:** â€”\nbody\n\n\
+            "# Plan\n\n## Phase 1: Build\n\n### Step 1.1: Do the thing\n**Wave:** A · **Depends on:** —\nbody\n\n\
              ### Step 1.2: Do the other thing\n**Wave:** A · **Depends on:** 1.1\nbody\n",
         )
         .unwrap();
@@ -1026,7 +1107,7 @@ mod tests {
     }
 
     /// Writes a valid handoff per plan agent into a temp "worktree" and returns
-    /// a wave report â€” hermetic stand-in for real agent execution.
+    /// a wave report — hermetic stand-in for real agent execution.
     struct TestWaveRunner;
 
     impl WaveRunner for TestWaveRunner {
@@ -1282,7 +1363,7 @@ mod tests {
         let deployer = MockDeployer { url: "https://x".to_string(), fail: false };
         let llm = crate::compounder_llm::LlmProvider::Static("[]".to_string());
 
-        // First pass: vercel CLI missing â†’ awaiting_user.
+        // First pass: vercel CLI missing → awaiting_user.
         let mut status = HashMap::new();
         status.insert("node".to_string(), CliStatus::Installed("v20".to_string()));
         status.insert("npm".to_string(), CliStatus::Installed("10".to_string()));
@@ -1307,7 +1388,7 @@ mod tests {
             .iter()
             .any(|s| s.name == "provision" && s.status == "awaiting_user"));
 
-        // Second pass with all CLIs â†’ resumes and finishes.
+        // Second pass with all CLIs → resumes and finishes.
         let adapters_ok = PipelineAdapters {
             deployer: &deployer,
             wave_runner: &TestWaveRunner,
@@ -1386,5 +1467,105 @@ mod tests {
 
         let report = run_pipeline(&db, &opts, &adapters).unwrap();
         assert_eq!(report.status, pipeline_store::STATUS_CANCELLED);
+    }
+
+    /// A runner whose agents never write a handoff: the agents failed.
+    struct HandofflessWaveRunner;
+
+    impl WaveRunner for HandofflessWaveRunner {
+        fn run(
+            &self,
+            db: &Mutex<Connection>,
+            plan_id: &str,
+            _base_repo: &str,
+        ) -> Result<WaveExecutionReport, String> {
+            let agents = {
+                let conn = db.lock().map_err(|e| e.to_string())?;
+                crate::orchestrator::get_plan_agents(&conn, plan_id)?
+            };
+            let mut report = WaveExecutionReport {
+                plan_id: plan_id.to_string(),
+                ..Default::default()
+            };
+            for agent in agents {
+                let worktree = std::env::temp_dir()
+                    .join(format!("acc-handoffless-{plan_id}-{}", agent.agent_ref));
+                std::fs::create_dir_all(&worktree).map_err(|e| e.to_string())?;
+                report.agents.push(AgentExecution {
+                    agent_ref: agent.agent_ref.clone(),
+                    session_id: format!("session-{plan_id}-{}", agent.agent_ref),
+                    worktree_path: worktree.to_string_lossy().to_string(),
+                    branch: "test".to_string(),
+                    status: "running".to_string(),
+                    guideline_path: String::new(),
+                    cost_usd: 0.0,
+                    retry_count: 0,
+                });
+            }
+            Ok(report)
+        }
+    }
+
+    #[test]
+    fn test_incomplete_agents_do_not_report_success() {
+        // The project already satisfies verification, so before this gate the
+        // pipeline would report `succeeded` even though no agent completed —
+        // overclaiming the product's core promise.
+        let conn = setup_db();
+        let db = Mutex::new(conn);
+        let project = make_verifiable_project();
+        let spec_dir = TempDir::new().unwrap();
+        let spec = make_spec(&spec_dir);
+        let opts = {
+            let conn = db.lock().unwrap();
+            make_opts(&conn, &project, &spec)
+        };
+
+        let deployer = MockDeployer {
+            url: "https://mock.example.app".to_string(),
+            fail: false,
+        };
+        let llm = crate::compounder_llm::LlmProvider::Static("[]".to_string());
+        let adapters = PipelineAdapters {
+            deployer: &deployer,
+            wave_runner: &HandofflessWaveRunner,
+            event_sink: &NoopEventSink,
+            llm: &llm,
+            cli_status: Some(all_clis_installed()),
+            run_compounder: false,
+        };
+
+        let report = run_pipeline(&db, &opts, &adapters).unwrap();
+
+        assert_eq!(
+            report.status,
+            pipeline_store::STATUS_AWAITING_USER,
+            "a wave with no completed agents must not report success"
+        );
+        assert!(report
+            .wave
+            .as_ref()
+            .unwrap()
+            .agents
+            .iter()
+            .all(|agent| agent.status == "failed"));
+        let deploy = report
+            .stages
+            .iter()
+            .find(|stage| stage.name == "deploy")
+            .unwrap();
+        assert_eq!(deploy.status, "skipped", "deploy must not run: {:?}", deploy.message);
+        assert!(
+            report.error.as_deref().unwrap_or_default().contains("did not complete"),
+            "error should explain the incomplete agents: {:?}",
+            report.error
+        );
+        assert!(report.deploy.is_none(), "nothing may be deployed");
+
+        let run = {
+            let conn = db.lock().unwrap();
+            pipeline_store::get_run(&conn, &opts.run_id).unwrap()
+        };
+        assert_eq!(run.status, pipeline_store::STATUS_AWAITING_USER);
     }
 }
