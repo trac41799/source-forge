@@ -1,0 +1,103 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    name: Web (lint, typecheck, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run lint:src
+      - run: npx tsc --noEmit
+      - run: npx vitest run
+
+  rust:
+    name: Rust (test, ${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  python:
+    name: Python (local-daemon, webhook-server)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r local-daemon/requirements.txt
+          pip install -r webhook-server/requirements.txt
+          pip install pytest pytest-asyncio
+      - name: local-daemon tests
+        working-directory: local-daemon
+        run: python -m pytest -q
+      - name: webhook-server tests
+        working-directory: webhook-server
+        run: python -m pytest -q
+
+  contract:
+    name: IPC contract (activates in Wave B / Step 2.1)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Run IPC contract test (if present)
+        if: ${{ hashFiles('src/__tests__/contracts/ipc-contract.test.ts') != '' }}
+        run: npx vitest run src/__tests__/contracts/ipc-contract.test.ts
+
+  real-cli-e2e:
+    name: Real CLI E2E (optional, non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf libssl-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Pipeline E2E (deterministic, hermetic)
+        run: cargo test -p sourceforge --lib pipeline::tests
+      - name: Real agent run (optional — requires provider key)
+        if: env.OPENROUTER_API_KEY != ''
+        run: |
+          npm i -g opencode-ai@latest || true
+          if [ -d tools/fixtures/fixture-repo ]; then
+            cargo run -p dogfood -- --agent opencode tools/fixtures/fixture-repo
+          else
+            echo "fixture repo not present yet — real-CLI run deferred to Wave D Step 4.4"
+          fi

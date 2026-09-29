@@ -12,8 +12,10 @@ export default tseslint.config(
       "target/**",
       "**/target/**",
       "**/.next/**",
-      ".worktrees/**",
       "src-tauri/target/**",
+      ".worktrees/**",
+      ".acc-test/**",
+      "landing/**",
     ],
   },
   {

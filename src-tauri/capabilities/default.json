@@ -12,11 +12,6 @@
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-set-title",
-    "shell:allow-open",
-    "shell:allow-execute",
-    "shell:allow-spawn",
-    "shell:allow-stdin-write",
-    "shell:allow-kill",
     "sql:default",
     "sql:allow-load",
     "sql:allow-execute",
@@ -43,7 +38,6 @@
     "notification:allow-notify",
     "notification:allow-request-permission",
     "notification:allow-is-permission-granted",
-    "http:default",
     "log:default"
   ]
 }

@@ -3,7 +3,7 @@ import { Link, useLocation } from "react-router-dom";
 import {
   Rocket, Map, Workflow, FolderOpen, BarChart3, Clock,
   Boxes, BookMarked, Brain, Clock4, Settings, DollarSign,
-  Moon, Sun,
+  Hammer, Moon, Sun,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -35,6 +35,7 @@ const navGroups: NavGroup[] = [
     id: "work",
     label: "WORK",
     items: [
+      { path: "/build", label: "Build App", icon: Hammer },
       { path: "/orchestrate", label: "Orchestrate", icon: Workflow },
       { path: "/knowledge", label: "Knowledge", icon: Brain },
     ],

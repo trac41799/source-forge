@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { IPC } from '@/lib/ipc/commands'
 import type { SkillBridgeStatus } from '../lib/types'
 
 interface SkillBridgeStore {
@@ -28,7 +29,7 @@ export const useSkillbridgeStore = create<SkillBridgeStore>((set) => ({
 
   checkStatus: async () => {
     try {
-      const result = await invoke<SkillBridgeCheckResult>('check_skillbridge_status')
+      const result = await invoke<SkillBridgeCheckResult>(IPC.checkSkillbridge)
       set({
         status: result.status,
         version: result.version ?? null,

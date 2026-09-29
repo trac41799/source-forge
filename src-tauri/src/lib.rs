@@ -10,6 +10,13 @@ pub mod events;
 mod integrations;
 pub mod intelligence;
 pub mod knowledge;
+mod knowledge_commands;
+mod compounder_llm;
+mod pipeline_store;
+mod deployer;
+mod pipeline;
+mod pipeline_commands;
+mod wave_supervisor;
 pub mod orchestrator;
 mod playbook;
 mod pty;
@@ -33,6 +40,8 @@ mod spec_parser;
 mod verification;
 mod wave_persistence;
 mod integration_tests;
+#[cfg(test)]
+mod real_pipeline_test;
 mod stack_registry;
 mod preferences;
 mod provisioner;
@@ -55,7 +64,6 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_http::init())
         .setup(|app| {
             let conn = db::init_db(app).expect("Failed to initialize database");
             let app_state = AppState::new(conn);
@@ -233,6 +241,12 @@ pub fn run() {
             commands::search_knowledge_cmd,
             commands::get_knowledge_stats_cmd,
             commands::get_compounder_status_cmd,
+            knowledge_commands::run_compounder_cmd,
+            knowledge_commands::get_preflight_warnings_cmd,
+            pipeline_commands::build_app_cmd,
+            pipeline_commands::resume_build_app_cmd,
+            pipeline_commands::cancel_build_app_cmd,
+            pipeline_commands::get_build_app_status_cmd,
             // Knowledge Graph Commands
             commands::kg_local_search_cmd,
             commands::kg_global_search_cmd,

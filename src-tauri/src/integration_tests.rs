@@ -264,6 +264,7 @@ mod wave_executor_tests {
             status: "running".to_string(),
             guideline_path: ".worktrees/plan-1-frontend/.acc/GUIDELINE.md".to_string(),
             cost_usd: 0.05,
+            retry_count: 0,
         };
         
         assert_eq!(exec.agent_ref, "frontend");
@@ -287,6 +288,7 @@ mod wave_executor_tests {
             status: "running".to_string(),
             guideline_path: ".worktrees/wt1/.acc/GUIDELINE.md".to_string(),
             cost_usd: 0.05,
+            retry_count: 0,
         });
         
         report.agents.push(AgentExecution {
@@ -297,6 +299,7 @@ mod wave_executor_tests {
             status: "done".to_string(),
             guideline_path: ".worktrees/wt2/.acc/GUIDELINE.md".to_string(),
             cost_usd: 0.10,
+            retry_count: 0,
         });
         
         assert_eq!(report.agents.len(), 2);

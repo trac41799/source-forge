@@ -51,30 +51,60 @@ impl AgentAdapter for OpenCodeAdapter {
     }
 
     fn version(&self) -> &str {
-        // Try to get version from CLI
-        let output = std::process::Command::new(&self.binary_path)
-            .arg("--version")
-            .output();
-
-        match output {
-            Ok(o) if o.status.success() => {
-                let version = String::from_utf8_lossy(&o.stdout);
-                Box::leak(version.trim().to_string().into_boxed_str())
+        // Cache once (previously leaked a String on every call) and go through
+        // `cmd /C` on Windows so the npm `.cmd` shim resolves.
+        static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CACHE.get_or_init(|| {
+            let mut cmd = if cfg!(windows) {
+                let mut c = std::process::Command::new("cmd");
+                c.arg("/C").arg(&self.binary_path);
+                c
+            } else {
+                std::process::Command::new(&self.binary_path)
+            };
+            match cmd.arg("--version").output() {
+                Ok(o) if o.status.success() => {
+                    String::from_utf8_lossy(&o.stdout).trim().to_string()
+                }
+                _ => "unknown".to_string(),
             }
-            _ => "unknown",
-        }
+        })
     }
 
     fn spawn(&self, task: &str, worktree: &str) -> Result<AgentSession, String> {
         let session_id = uuid::Uuid::new_v4().to_string();
 
-        // Build command: opencode run "task" --title "session_id"
-        let mut cmd = Command::new(&self.binary_path);
+        // Build command: opencode run "<task>" --title "<session_id>" --auto [--model <model>]
+        //
+        // On Windows the npm-installed CLI is a `.cmd` shim, which
+        // `Command::new("opencode")` cannot execute directly — go through
+        // `cmd /C` so PATHEXT resolution applies.
+        let mut cmd = if cfg!(windows) {
+            let mut c = Command::new("cmd");
+            c.arg("/C").arg(&self.binary_path);
+            c
+        } else {
+            Command::new(&self.binary_path)
+        };
+
         cmd.arg("run")
             .arg(task)
             .arg("--title")
             .arg(&session_id)
-            .current_dir(worktree)
+            // Headless runs must auto-approve permissions or they block on a
+            // prompt forever (observed in the Wave F acceptance run).
+            .arg("--auto");
+
+        // The default model may not be tool-capable (it can claim success
+        // without writing files). Allow the operator to pin one.
+        if let Ok(model) = std::env::var("ACC_AGENT_MODEL") {
+            let model = model.trim();
+            if !model.is_empty() {
+                cmd.arg("--model").arg(model);
+            }
+        }
+
+        cmd.current_dir(worktree)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -90,7 +120,7 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stdout) = child.stdout.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] {}", session_id_clone, line));
@@ -102,7 +132,7 @@ impl AgentAdapter for OpenCodeAdapter {
         if let Some(stderr) = child.stderr.take() {
             let tx = output_tx.clone();
             let session_id_clone = session_id.clone();
-            tokio::spawn(async move {
+            tauri::async_runtime::spawn(async move {
                 let mut reader = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
                     let _ = tx.send(format!("[opencode:{}] [stderr] {}", session_id_clone, line));
@@ -114,7 +144,7 @@ impl AgentAdapter for OpenCodeAdapter {
         let handle = ProcessHandle { child, output_tx };
         let processes = self.processes.clone();
         let session_id_store = session_id.clone();
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             let mut procs = processes.lock().await;
             procs.insert(session_id_store, handle);
         });
@@ -131,7 +161,10 @@ impl AgentAdapter for OpenCodeAdapter {
         let processes = self.processes.clone();
         let session_id = session.id.clone();
 
-        tokio::spawn(async move {
+        // Tauri's global runtime, not `tokio::spawn`: the supervisor kills
+        // agents from the pipeline's synchronous stage loop, where no Tokio
+        // runtime is in scope ("there is no reactor running" panic).
+        tauri::async_runtime::spawn(async move {
             let mut procs = processes.lock().await;
             if let Some(handle) = procs.get_mut(&session_id) {
                 handle.kill().await;
@@ -190,12 +223,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_opencode_adapter_spawn_creates_session() {
+    async fn test_opencode_adapter_spawn_smoke() {
+        // Environment-dependent: if the CLI resolves we get a well-formed
+        // session; otherwise the error must be descriptive. (Not vacuous.)
         let adapter = OpenCodeAdapter::new();
-        let result = adapter.spawn("test task", "/tmp");
-        // Will fail because opencode is not installed or /tmp doesn't exist
-        // But we can check the error message
-        assert!(result.is_err() || result.is_ok());
+        match adapter.spawn("test task", ".") {
+            Ok(session) => {
+                assert_eq!(session.agent_id, "opencode");
+                assert!(!session.id.is_empty());
+                assert_eq!(session.worktree, ".");
+            }
+            Err(error) => assert!(!error.is_empty(), "error must be descriptive"),
+        }
     }
 
     #[tokio::test]

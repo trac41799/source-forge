@@ -17,6 +17,16 @@ use std::process::Command;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+
+    // Agent probe mode (Wave D Step 4.4):
+    //   dogfood --agent "<command with args>" <fixture_repo>
+    // Spawns a real (or stub) agent, waits for a valid HANDOFF_*.md, exits 0/1.
+    if args.get(1).map(|a| a.as_str()) == Some("--agent") {
+        let agent_cmd = args.get(2).cloned().unwrap_or_default();
+        let fixture = args.get(3).cloned().unwrap_or_else(|| ".".to_string());
+        std::process::exit(run_agent_probe(&agent_cmd, &fixture));
+    }
+
     let base_repo = args.get(1).cloned().unwrap_or_else(|| ".".to_string());
     let spec_path = args
         .get(2)
@@ -275,4 +285,112 @@ fn parse_minimal(markdown: &str) -> Vec<Task> {
     }
 
     tasks
+}
+
+// -----------------------------------------------------------------------------
+// Agent probe (Wave D Step 4.4)
+// -----------------------------------------------------------------------------
+
+/// Spawn `<agent_cmd> <prompt>` in the fixture repo, then wait for a valid
+/// HANDOFF_*.md. Returns process exit code (0 = valid handoff produced).
+fn run_agent_probe(agent_cmd: &str, fixture: &str) -> i32 {
+    println!("[dogfood] agent probe: '{}' in {}", agent_cmd, fixture);
+    if agent_cmd.trim().is_empty() {
+        eprintln!("[dogfood] empty agent command");
+        return 2;
+    }
+
+    let parts = split_command(agent_cmd);
+    if parts.is_empty() {
+        eprintln!("[dogfood] empty agent command");
+        return 2;
+    }
+    let mut cmd = Command::new(&parts[0]);
+    for arg in &parts[1..] {
+        cmd.arg(arg);
+    }
+    cmd.arg("Implement the task in .acc/GUIDELINE.md and write HANDOFF_<agent>.md when done.");
+    cmd.current_dir(fixture);
+
+    match cmd.status() {
+        Ok(status) => println!("[dogfood] agent exited with {}", status),
+        Err(e) => {
+            eprintln!("[dogfood] failed to spawn agent: {}", e);
+            return 1;
+        }
+    }
+
+    let timeout_secs: u64 = std::env::var("ACC_AGENT_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(120);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
+
+    loop {
+        if let Some(path) = find_handoff(fixture) {
+            let content = fs::read_to_string(&path).unwrap_or_default();
+            let required = [
+                "Completed Work",
+                "Test Results",
+                "Interface Contracts Exposed",
+                "Files NOT Modified",
+                "Design Decisions",
+                "Handoff Instructions",
+            ];
+            let missing: Vec<&str> = required
+                .iter()
+                .copied()
+                .filter(|section| !content.contains(section))
+                .collect();
+            if missing.is_empty() {
+                println!("[dogfood] valid handoff: {}", path);
+                return 0;
+            }
+            eprintln!("[dogfood] handoff {} missing sections: {:?}", path, missing);
+            return 1;
+        }
+
+        if std::time::Instant::now() >= deadline {
+            eprintln!(
+                "[dogfood] timeout ({}s) waiting for HANDOFF_*.md in {}",
+                timeout_secs, fixture
+            );
+            return 1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+}
+
+fn find_handoff(dir: &str) -> Option<String> {
+    let entries = fs::read_dir(dir).ok()?;
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if name.starts_with("HANDOFF_") && name.ends_with(".md") {
+            return Some(entry.path().to_string_lossy().to_string());
+        }
+    }
+    None
+}
+
+/// Split a command string into program + args, respecting double quotes
+/// (needed for Windows paths containing spaces).
+fn split_command(cmd: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    for ch in cmd.chars() {
+        match ch {
+            '"' => in_quotes = !in_quotes,
+            ' ' | '\t' if !in_quotes => {
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    out
 }

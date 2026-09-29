@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { IPC } from "@/lib/ipc/commands";
 import { useBudgetStore, type WipEntry } from "@/stores/budgetStore";
 import {
   DollarSign, Zap, BarChart3, Layers, Clock, Cpu, AlertTriangle,
@@ -58,7 +59,7 @@ export default function CostAggregation() {
 
   const loadSummary = useCallback(async () => {
     try {
-      const data = await invoke<CostSummary>("get_cost_summary", { projectId: null });
+      const data = await invoke<CostSummary>(IPC.getCostSummary, { projectId: null });
       setSummary(data);
     } catch (e) {
       setError(String(e));

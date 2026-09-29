@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from "react";
-import { Route, Routes, Navigate } from "react-router-dom";
+import { Route, Routes, Navigate, useLocation } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { RecoveryBanner } from "@/components/RecoveryBanner";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { PlaceholderPage } from "@/pages/placeholder";
 import Runner from "@/pages/Runner";
 import Integrations from "@/pages/Integrations";
@@ -16,10 +17,12 @@ import CostAggregation from "@/pages/CostAggregation";
 import Knowledge from "@/pages/Knowledge";
 import Scheduler from "@/pages/Scheduler";
 import Settings from "@/pages/Settings";
+import BuildApp from "@/pages/BuildApp";
 import { invoke } from "@tauri-apps/api/core";
 import type { AppStateSnapshot } from "@/lib/types";
 
 function App() {
+  const location = useLocation();
   const hasCheckedRef = useRef(false);
   const [recoverySnapshot, setRecoverySnapshot] = useState<AppStateSnapshot | null>(null);
 
@@ -40,7 +43,7 @@ function App() {
           }
         }
       } catch {
-        // First launch — no snapshot exists
+        // First launch â€” no snapshot exists
       }
     })();
 
@@ -67,11 +70,13 @@ function App() {
             />
           )}
           <main className="flex-1 overflow-auto">
-            <Routes>
+            <ErrorBoundary key={location.pathname}>
+              <Routes>
               <Route path="/" element={<Navigate to="/runner" replace />} />
               <Route path="/runner" element={<Runner />} />
               <Route path="/route" element={<RoutePage />} />
               <Route path="/orchestrate" element={<Orchestrate />} />
+              <Route path="/build" element={<BuildApp />} />
               <Route path="/orchestrate/handoffs" element={<Orchestrate />} />
               <Route path="/orchestrate/messages" element={<Orchestrate />} />
               <Route path="/handoffs" element={<Navigate to="/orchestrate/handoffs" replace />} />
@@ -88,6 +93,7 @@ function App() {
               <Route path="/settings" element={<Settings />} />
               <Route path="*" element={<PlaceholderPage />} />
             </Routes>
+            </ErrorBoundary>
           </main>
         </div>
       </div>
