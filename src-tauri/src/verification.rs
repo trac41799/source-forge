@@ -263,10 +263,12 @@ fn verify_project_lenient(base: &Path) -> VerificationReport {
     check_package_scripts(base, &mut report);
 
     // ── 2. Build output ──────────────────────────────────────────
-    check_build_output(base, &mut report);
-    check_index_html(base, &mut report);
+    // Run the build first: the artifact checks below inspect its output, so
+    // checking them beforehand can never pass on a fresh project.
     check_typescript(base, &mut report);
     check_npm_build(base, &mut report);
+    check_build_output(base, &mut report);
+    check_index_html(base, &mut report);
 
     // ── 3. Deployment config ─────────────────────────────────────
     check_spa_config(base, &mut report);
@@ -448,8 +450,10 @@ fn check_package_scripts(base: &Path, report: &mut VerificationReport) {
 fn check_build_output(base: &Path, report: &mut VerificationReport) {
     let has_dist = base.join("dist").is_dir();
     let has_build = base.join("build").is_dir();
-    if has_dist || has_build {
-        let dir = if has_dist { "dist/" } else { "build/" };
+    // Next.js emits .next/ (BUILD_ID appears once the build finished).
+    let has_next = base.join(".next").join("BUILD_ID").exists();
+    if has_dist || has_build || has_next {
+        let dir = if has_dist { "dist/" } else if has_build { "build/" } else { ".next/" };
         report.add(BuildCheck {
             name: "build output exists".into(),
             status: CheckStatus::Pass,
@@ -502,6 +506,20 @@ fn check_index_html(base: &Path, report: &mut VerificationReport) {
     }
 }
 
+/// `npm`/`npx` are `.cmd` shims on Windows, which `Command::new` cannot
+/// execute: they must go through `cmd /C` (the same fix the agent adapter
+/// needed). Without this every build/typecheck check reported
+/// "program not found" and could never actually run.
+fn npm_command(program: &str) -> std::process::Command {
+    if cfg!(windows) {
+        let mut cmd = std::process::Command::new("cmd");
+        cmd.arg("/C").arg(program);
+        cmd
+    } else {
+        std::process::Command::new(program)
+    }
+}
+
 fn check_typescript(base: &Path, report: &mut VerificationReport) {
     if !base.join("tsconfig.json").exists() {
         report.add(BuildCheck {
@@ -511,7 +529,7 @@ fn check_typescript(base: &Path, report: &mut VerificationReport) {
         });
         return;
     }
-    let output = Command::new("npx")
+    let output = npm_command("npx")
         .args(["tsc", "--noEmit"])
         .current_dir(base)
         .output();
@@ -524,11 +542,31 @@ fn check_typescript(base: &Path, report: &mut VerificationReport) {
             });
         }
         Ok(out) => {
+            // `tsc` writes diagnostics to stdout, not stderr. Counting only
+            // stderr reported "0 errors" for a failing typecheck.
+            let stdout = String::from_utf8_lossy(&out.stdout);
             let stderr = String::from_utf8_lossy(&out.stderr);
-            let err_count = stderr.lines().filter(|l| l.contains("error TS")).count();
+            let err_count = stdout
+                .lines()
+                .chain(stderr.lines())
+                .filter(|line| line.contains("error TS"))
+                .count();
+            let mut detail: Vec<&str> = stdout
+                .lines()
+                .chain(stderr.lines())
+                .filter(|line| line.contains("error TS"))
+                .take(3)
+                .collect();
             report.add(BuildCheck {
                 name: "TypeScript compiles".into(),
-                status: CheckStatus::Fail(format!("tsc --noEmit: {} errors", err_count)),
+                status: CheckStatus::Fail(format!(
+                    "tsc --noEmit: {err_count} errors{}",
+                    if detail.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" — {}", detail.drain(..).collect::<Vec<_>>().join(" | "))
+                    }
+                )),
                 detail: String::new(),
             });
         }
@@ -556,7 +594,7 @@ fn check_npm_build(base: &Path, report: &mut VerificationReport) {
         });
         return;
     }
-    let output = Command::new("npm")
+    let output = npm_command("npm")
         .args(["run", "build"])
         .current_dir(base)
         .output();
@@ -568,10 +606,18 @@ fn check_npm_build(base: &Path, report: &mut VerificationReport) {
                 detail: "Build succeeded".into(),
             });
         }
-        Ok(_) => {
+        Ok(out) => {
+            // A failed build with no output tail is undiagnosable.
+            let text = format!(
+                "{}{}",
+                String::from_utf8_lossy(&out.stdout),
+                String::from_utf8_lossy(&out.stderr)
+            );
+            let tail: Vec<&str> = text.lines().rev().take(6).collect();
+            let tail = tail.into_iter().rev().collect::<Vec<_>>().join(" | ");
             report.add(BuildCheck {
                 name: "npm run build passes".into(),
-                status: CheckStatus::Fail("npm run build failed — check build errors".into()),
+                status: CheckStatus::Fail(format!("npm run build failed: {tail}")),
                 detail: String::new(),
             });
         }
@@ -832,6 +878,29 @@ fn check_security(base: &Path, report: &mut VerificationReport) {
     }
 }
 
+fn server_log_path() -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("sourceforge-e2e-{}.log", std::process::id()))
+}
+
+/// Server stdout/stderr → log file (never a pipe nobody drains). Falls back to
+/// the null device if the temp file cannot be opened.
+fn server_log_stdio() -> Stdio {
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(server_log_path())
+        .map(Stdio::from)
+        .unwrap_or_else(|_| Stdio::null())
+}
+
+fn server_log_tail() -> String {
+    let Ok(text) = std::fs::read_to_string(server_log_path()) else {
+        return String::new();
+    };
+    let lines: Vec<&str> = text.lines().rev().take(6).collect();
+    lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
+}
+
 fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
     let is_nextjs = base.join("next.config.ts").exists() || base.join("next.config.js").exists();
     let is_express = base.join("src").join("server.ts").exists();
@@ -879,8 +948,8 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
             .env("NEXT_PUBLIC_SUPABASE_URL", "https://placeholder.supabase.co")
             .env("NEXT_PUBLIC_SUPABASE_ANON_KEY", "placeholder")
             .current_dir(base)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stdout(server_log_stdio())
+            .stderr(server_log_stdio())
             .spawn()
             .ok();
     } else if is_express {
@@ -894,7 +963,7 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
                 .env("DATABASE_URL", "postgresql://none:none@localhost:5432/none")
                 .env("NODE_ENV", "test")
                 .current_dir(base)
-                .stdout(Stdio::piped()).stderr(Stdio::piped())
+                .stdout(server_log_stdio()).stderr(server_log_stdio())
                 .spawn().ok();
         }
     }
@@ -913,12 +982,11 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
 
     // Wait for boot
     let mut booted = false;
-    for _ in 0..40 { // Next.js takes longer to boot
+    for _ in 0..120 {
+        // Next dev cold-compiles on first request: allow up to 60s.
         std::thread::sleep(Duration::from_millis(500));
-        if http_get(port, if is_nextjs { "/api/auth/register" } else { "/api/health" }) == Ok(405) || http_get(port, if is_nextjs { "/api/auth/login" } else { "/api/health" }) == Ok(405) {
-            continue; // 405 = server booting but route not ready yet
-        }
-        if http_get(port, if is_nextjs { "/" } else { "/api/health" }).is_ok() {
+        // Probe a route any app has; `/api/auth/*` is template-specific.
+        if http_get(port, "/api/health").is_ok() || http_get(port, "/").is_ok() {
             booted = true;
             break;
         }
@@ -928,8 +996,35 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
         let _ = server.kill();
         report.add(BuildCheck {
             name: "E2E runtime test".into(),
-            status: CheckStatus::Fail("Server failed to boot within 20 seconds".into()),
+            status: CheckStatus::Fail(format!(
+                "Server failed to boot within 60 seconds: {}",
+                server_log_tail()
+            )),
             detail: String::new(),
+        });
+        return;
+    }
+
+    // The auth-flow probes below belong to the reference template. An app
+    // without auth routes would be failed for endpoints it never had, so the
+    // runtime check verifies what the app does expose: that it serves traffic.
+    let has_auth_routes = base.join("app").join("api").join("auth").exists()
+        || base.join("src").join("routes").join("auth").exists();
+    if !has_auth_routes {
+        let responds = http_get(port, "/api/health").is_ok() || http_get(port, "/").is_ok();
+        let _ = server.kill();
+        report.add(BuildCheck {
+            name: "E2E runtime test".into(),
+            status: if responds {
+                CheckStatus::Pass
+            } else {
+                CheckStatus::Fail("server booted but no route responded".into())
+            },
+            detail: if responds {
+                "Server booted and served a response (no auth routes in this app — auth-flow probes not applicable)".into()
+            } else {
+                String::new()
+            },
         });
         return;
     }

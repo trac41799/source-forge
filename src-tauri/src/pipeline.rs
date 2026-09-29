@@ -1037,6 +1037,18 @@ fn install_project_dependencies(project_path: &str) -> Result<String, String> {
         vec!["install", "--no-audit", "--no-fund"]
     };
 
+    // Bootstrap `.env` from `.env.example` when missing: toolchains run during
+    // `npm install` (e.g. Prisma's `postinstall: prisma generate`) resolve the
+    // datasource URL and fail hard without it. Never clobber a real `.env`.
+    let mut bootstrapped = false;
+    let env_example = base.join(".env.example");
+    let env_file = base.join(".env");
+    if !env_file.exists() && env_example.exists() {
+        std::fs::copy(&env_example, &env_file)
+            .map_err(|e| format!("cannot bootstrap .env from .env.example: {e}"))?;
+        bootstrapped = true;
+    }
+
     let mut cmd = if cfg!(windows) {
         let mut c = std::process::Command::new("cmd");
         c.arg("/C").arg("npm");
@@ -1046,8 +1058,13 @@ fn install_project_dependencies(project_path: &str) -> Result<String, String> {
     };
     cmd.args(&args).current_dir(base);
 
-    run_with_timeout(cmd, DEPENDENCY_INSTALL_TIMEOUT_SECS)
-        .map(|_| format!("dependencies installed (npm {})", args.join(" ")))
+    run_with_timeout(cmd, DEPENDENCY_INSTALL_TIMEOUT_SECS).map(|_| {
+        format!(
+            "dependencies installed (npm {}{})",
+            args.join(" "),
+            if bootstrapped { ", .env bootstrapped" } else { "" }
+        )
+    })
 }
 
 /// Run a command with a wall-clock timeout, sending its output to a temp log so
