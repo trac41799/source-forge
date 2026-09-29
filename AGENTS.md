@@ -12,8 +12,9 @@ just by convention:
 2. Commit there; open a PR.
 3. Merge only after review (below).
 
-Do not commit, amend, or push to `main`. Do not force-push. Do not `git push` any branch
-other than your own feature branch.
+Do not commit, amend, or push to `main`. Do not `git push` any branch other than your own
+feature branch. Do not force-push a shared branch; `git push --force-with-lease` is permitted
+**only** on your own open PR branch, to update it after a rebase onto `origin/main`.
 
 ## 2. Use a git worktree per batch of work
 
