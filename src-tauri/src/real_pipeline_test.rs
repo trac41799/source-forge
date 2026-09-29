@@ -247,10 +247,11 @@ fn test_real_pipeline_end_to_end() {
             let worktree = Path::new(&agent.worktree_path);
             let handoff = worktree.join(format!("HANDOFF_{}.md", agent.agent_ref));
             println!(
-                "  {:<6} status={:<8} handoff_exists={}  worktree={}",
+                "  {:<6} status={:<8} handoff_exists={}  cost_usd={:.4}  worktree={}",
                 agent.agent_ref,
                 agent.status,
                 handoff.exists(),
+                agent.cost_usd,
                 agent.worktree_path
             );
             println!(

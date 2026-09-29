@@ -47,6 +47,12 @@ pub trait AgentControl: Send + Sync {
     fn is_running(&self, _agent: &AgentExecution) -> bool {
         true
     }
+
+    /// Cost reported by the agent so far, if the adapter can tell. `None`
+    /// means "unknown" and leaves the cost cap unable to trigger.
+    fn cost_usd(&self, _agent: &AgentExecution) -> Option<f64> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -68,7 +74,7 @@ fn handoff_path(agent: &AgentExecution) -> std::path::PathBuf {
 }
 
 fn wait_for_handoff(
-    agent: &AgentExecution,
+    agent: &mut AgentExecution,
     config: &SupervisionConfig,
     control: &dyn AgentControl,
     cancel_check: &dyn Fn() -> bool,
@@ -79,6 +85,15 @@ fn wait_for_handoff(
     loop {
         if cancel_check() {
             return WaitResult::Cancelled;
+        }
+
+        // Refresh the observed cost so the cap reflects the adapter's telemetry
+        // (it was previously never populated on the adapter path, making the cap
+        // inert). Monotonic: cost must never go down.
+        if let Some(reported) = control.cost_usd(agent) {
+            if reported > agent.cost_usd {
+                agent.cost_usd = reported;
+            }
         }
 
         if let Some(cap) = config.cost_cap_usd {
@@ -447,5 +462,54 @@ mod tests {
             elapsed < Duration::from_secs(2),
             "must fail fast when the process exited, took {elapsed:?}"
         );
+    }
+
+    struct CostReportingControl {
+        respawns: Mutex<usize>,
+    }
+
+    impl AgentControl for CostReportingControl {
+        fn kill(&self, _agent: &AgentExecution) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn respawn(&self, _agent: &AgentExecution) -> Result<String, String> {
+            *self.respawns.lock().unwrap() += 1;
+            Ok("session-2".to_string())
+        }
+
+        fn cost_usd(&self, _agent: &AgentExecution) -> Option<f64> {
+            Some(1.0)
+        }
+    }
+
+    #[test]
+    fn test_cost_cap_triggers_from_adapter_telemetry() {
+        // M9: the cap was inert because `agent.cost_usd` was never populated on
+        // the adapter path. It now follows the adapter's reported cost.
+        let dir = TempDir::new().unwrap();
+        let db = Mutex::new(setup_db());
+        let control = CostReportingControl {
+            respawns: Mutex::new(0),
+        };
+        let mut wave = report(agent(dir.path()));
+
+        let config = SupervisionConfig {
+            timeout: Duration::from_secs(30),
+            poll_interval: Duration::from_millis(5),
+            max_retries: 1,
+            cost_cap_usd: Some(0.5),
+        };
+
+        let outcome = supervise_agents(&db, &mut wave, &config, &control, &no_cancel).unwrap();
+
+        assert_eq!(outcome.failed, 1, "the cap must stop the agent");
+        assert_eq!(
+            *control.respawns.lock().unwrap(),
+            0,
+            "no retry once the cap is exceeded"
+        );
+        assert_eq!(wave.agents[0].cost_usd, 1.0, "telemetry must be recorded");
+        assert_eq!(wave.agents[0].status, "failed");
     }
 }

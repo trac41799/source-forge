@@ -234,6 +234,16 @@ impl crate::wave_supervisor::AgentControl for AdapterWaveRunner {
         }
     }
 
+    fn cost_usd(&self, agent: &AgentExecution) -> Option<f64> {
+        let adapter = self.registry.get(&self.agent_command)?;
+        adapter.session_cost(&crate::agent_adapters::AgentSession {
+            id: agent.session_id.clone(),
+            agent_id: self.agent_command.clone(),
+            worktree: agent.worktree_path.clone(),
+            started_at: chrono::Utc::now(),
+        })
+    }
+
     fn respawn(&self, agent: &AgentExecution) -> Result<String, String> {
         let adapter = self
             .registry
