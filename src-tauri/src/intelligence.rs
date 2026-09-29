@@ -169,7 +169,7 @@ pub fn update_failure_diagnosis(
     confidence: f64,
 ) -> Result<(), String> {
     db.execute(
-        "UPDATE failure_analyses SET diagnosis = ?1, diagnosis = ?1 WHERE id = ?2",
+        "UPDATE failure_analyses SET diagnosis = ?1 WHERE id = ?2",
         rusqlite::params![diagnosis, analysis_id],
     )
     .map_err(|e| e.to_string())?;
@@ -620,6 +620,17 @@ pub fn suggest_outcome(pty_output: &str, idle_seconds: u64) -> Option<String> {
     None
 }
 
+/// M2 (spec R21): pure decision wrapper — classify an outcome from a PTY tail.
+pub fn decide_outcome(
+    cfg: &crate::decision::DecisionConfig,
+    transport: &dyn crate::decision::DecisionTransport,
+    key: Option<&str>,
+    pty_tail: &str,
+) -> Result<Option<String>, crate::decision::DecisionError> {
+    Ok(crate::decision::classify_outcome(cfg, transport, key, pty_tail, None)?
+        .map(|(label, _)| label))
+}
+
 /// M2 (spec R21): classify the session outcome via the decision layer, falling
 /// back to the keyword heuristic when the backend is unavailable.
 pub fn suggest_outcome_decision(
@@ -632,13 +643,36 @@ pub fn suggest_outcome_decision(
     if key.is_some() || cfg.backend == "local" {
         let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
         let tail = extract_pty_context(pty_output, 200);
-        if let Ok(Some((label, _))) =
-            crate::decision::classify_outcome(&cfg, &transport, key.as_deref(), &tail, Some(db))
-        {
+        if let Ok(Some(label)) = decide_outcome(&cfg, &transport, key.as_deref(), &tail) {
             return Some(label);
         }
     }
     suggest_outcome(pty_output, idle_seconds)
+}
+
+/// M2 (spec R23): pure decision wrapper — does the fix address the root cause?
+pub fn decide_failure_confidence(
+    cfg: &crate::decision::DecisionConfig,
+    transport: &dyn crate::decision::DecisionTransport,
+    key: Option<&str>,
+    diagnosis: &str,
+    root_cause: &str,
+    suggested_fix: &str,
+) -> Result<Option<f64>, crate::decision::DecisionError> {
+    let state = serde_json::json!({
+        "diagnosis": diagnosis,
+        "root_cause": root_cause,
+        "suggested_fix": suggested_fix,
+    });
+    crate::decision::judge(
+        cfg,
+        transport,
+        key,
+        &state,
+        "Does `suggested_fix` address `root_cause`?",
+        "addresses",
+        None,
+    )
 }
 
 /// M2 (spec R23): confidence that a suggested fix addresses the root cause,
@@ -653,24 +687,128 @@ pub fn failure_confidence_decision(
     let key = std::env::var("OPENROUTER_API_KEY").ok();
     if key.is_some() || cfg.backend == "local" {
         let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
-        let state = serde_json::json!({
-            "diagnosis": diagnosis,
-            "root_cause": root_cause,
-            "suggested_fix": suggested_fix,
-        });
-        if let Ok(Some(p)) = crate::decision::judge(
+        if let Ok(Some(p)) = decide_failure_confidence(
             &cfg,
             &transport,
             key.as_deref(),
-            &state,
-            "Does `suggested_fix` address `root_cause`?",
-            "addresses",
-            Some(db),
+            diagnosis,
+            root_cause,
+            suggested_fix,
         ) {
             return p;
         }
     }
     0.0
+}
+
+/// Synchronous OpenRouter call (blocking), for callers already on a blocking path
+/// (e.g. a sync Tauri command holding the DB guard) that cannot `.await`.
+pub fn invoke_openrouter_blocking(
+    request: OpenRouterRequest,
+    api_key: &str,
+    max_retries: u32,
+) -> Result<OpenRouterResponse, String> {
+    let mut last = String::new();
+    for attempt in 0..=max_retries {
+        if attempt > 0 {
+            let backoff = 500u64.saturating_mul(1 << (attempt - 1).min(6));
+            std::thread::sleep(std::time::Duration::from_millis(backoff));
+        }
+        match invoke_openrouter_sync(&request, api_key) {
+            Ok(r) => return Ok(r),
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+fn invoke_openrouter_sync(
+    request: &OpenRouterRequest,
+    api_key: &str,
+) -> Result<OpenRouterResponse, String> {
+    let model = request.model.as_deref().unwrap_or("anthropic/claude-3.5-sonnet");
+    let body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": &request.prompt}],
+        "max_tokens": request.max_tokens.unwrap_or(4096),
+        "temperature": request.temperature.unwrap_or(0.7),
+    });
+    let resp: ureq::Response = ureq::post("https://openrouter.ai/api/v1/chat/completions")
+        .set("Authorization", &format!("Bearer {api_key}"))
+        .set("Content-Type", "application/json")
+        .send_json(&body)
+        .map_err(|e| format!("OpenRouter request failed: {e}"))?;
+    let json: serde_json::Value = resp.into_json().map_err(|e| format!("Parse response: {e}"))?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
+    let tokens_used = json["usage"]["total_tokens"].as_u64().unwrap_or(0) as u32;
+    Ok(OpenRouterResponse {
+        content,
+        model: model.to_string(),
+        tokens_used,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decision::{DecisionConfig, DecisionError, DecisionTransport};
+
+    struct Mock {
+        fail: bool,
+        payload: serde_json::Value,
+    }
+    impl DecisionTransport for Mock {
+        fn post(
+            &self,
+            _url: &str,
+            _key: Option<&str>,
+            _body: &serde_json::Value,
+        ) -> Result<serde_json::Value, DecisionError> {
+            if self.fail {
+                Err(DecisionError::Transport("x".into()))
+            } else {
+                Ok(self.payload.clone())
+            }
+        }
+    }
+
+    #[test]
+    fn decide_outcome_uses_decision() {
+        let cfg = DecisionConfig::default();
+        let m = Mock {
+            fail: false,
+            payload: serde_json::json!({
+                "model": "m",
+                "answers": { "outcome": { "type": "choice", "choice": "done",
+                                          "probabilities": {"done": 1.0}, "confidence": 0.9 } },
+                "usage": { "input_tokens": 1, "cost": 0.0 }
+            }),
+        };
+        assert_eq!(
+            decide_outcome(&cfg, &m, None, "all tests passed").unwrap(),
+            Some("done".to_string())
+        );
+    }
+
+    #[test]
+    fn decide_failure_confidence_uses_noul() {
+        let cfg = DecisionConfig::default();
+        let m = Mock {
+            fail: false,
+            payload: serde_json::json!({
+                "model": "m",
+                "answers": { "addresses": { "type": "noul", "noul": 0.8 } },
+                "usage": { "input_tokens": 1, "cost": 0.0 }
+            }),
+        };
+        assert_eq!(
+            decide_failure_confidence(&cfg, &m, None, "d", "rc", "fix").unwrap(),
+            Some(0.8)
+        );
+    }
 }
 
 // ============================================================================

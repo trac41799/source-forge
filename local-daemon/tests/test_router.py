@@ -1,8 +1,11 @@
 from router import (
+    audit_decision,
     build_router_prompt,
     build_router_questions,
+    decision_thresholds,
     parse_decision_response,
     parse_router_response,
+    policy_action,
 )
 
 
@@ -108,3 +111,51 @@ class TestDecisionRouting:
             parse_decision_response({"answers": {"agent": {"type": "noul", "noul": 0.5}}})
             is None
         )
+
+
+class TestPolicyActionBand:
+    """R-3: the daemon must apply the same accept/review band as the app."""
+
+    def test_apply_at_or_above_accept(self):
+        assert policy_action(0.80, 0.75, 0.40) == "apply"
+        assert policy_action(0.75, 0.75, 0.40) == "apply"
+
+    def test_review_between_thresholds(self):
+        assert policy_action(0.74, 0.75, 0.40) == "review"
+        assert policy_action(0.40, 0.75, 0.40) == "review"
+
+    def test_skip_below_review(self):
+        assert policy_action(0.39, 0.75, 0.40) == "skip"
+
+
+class TestDecisionThresholds:
+    def test_defaults_match_app(self, monkeypatch):
+        monkeypatch.delenv("DECISION_ACCEPT_THRESHOLD", raising=False)
+        monkeypatch.delenv("DECISION_REVIEW_THRESHOLD", raising=False)
+        assert decision_thresholds() == (0.75, 0.40)
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("DECISION_ACCEPT_THRESHOLD", "0.9")
+        monkeypatch.setenv("DECISION_REVIEW_THRESHOLD", "0.5")
+        assert decision_thresholds() == (0.9, 0.5)
+
+    def test_bad_env_falls_back_to_default(self, monkeypatch):
+        monkeypatch.setenv("DECISION_ACCEPT_THRESHOLD", "not-a-number")
+        assert decision_thresholds()[0] == 0.75
+
+
+class TestAuditDecision:
+    def test_emits_json_usage_line(self, caplog):
+        import json as _json
+        import logging as _logging
+
+        with caplog.at_level(_logging.INFO):
+            rec = audit_decision(
+                "daemon.router", "http://x", "m", "b", 0.91, "apply", 12.5
+            )
+        assert rec["policy_outcome"] == "apply"
+        assert rec["chosen"] == "b"
+        joined = "\n".join(r.getMessage() for r in caplog.records)
+        assert "decision_usage" in joined
+        payload = joined.split("decision_usage ", 1)[1]
+        assert _json.loads(payload)["confidence"] == 0.91

@@ -78,8 +78,10 @@ interface IntelligenceStore {
   heartbeatResults: HeartbeatResult[];
 
   recordOutcome: (sessionId: string, agentId: string, taskType: string, outcome: string, durationS: number) => Promise<OutcomeRecord>;
+  inferOutcome: (sessionId: string, agentId: string, taskType: string, ptyOutput: string, idleSeconds: number, durationS: number) => Promise<OutcomeRecord>;
   getOutcomeStats: (projectId?: string, agentId?: string) => Promise<void>;
   createFailureAnalysis: (sessionId: string, ptyExcerpt: string) => Promise<FailureAnalysis>;
+  diagnoseFailure: (analysisId: string, diagnosis: string, rootCause: string, suggestedFix: string) => Promise<number>;
   getFailureAnalyses: (sessionId?: string, limit?: number) => Promise<void>;
   detectLimitEvent: (rawOutput: string) => Promise<[string, string] | null>;
   recordLimitEvent: (sessionId: string, planAgentId: string | null, eventType: string, rawMessage: string) => Promise<LimitEvent>;
@@ -108,6 +110,17 @@ export const useIntelligenceStore = create<IntelligenceStore>((set) => ({
     return result;
   },
 
+  inferOutcome: async (sessionId, agentId, taskType, ptyOutput, idleSeconds, durationS) => {
+    return await invoke<OutcomeRecord>("infer_outcome_cmd", {
+      sessionId,
+      agentId,
+      taskType,
+      ptyOutput,
+      idleSeconds,
+      durationS,
+    });
+  },
+
   getOutcomeStats: async (projectId, agentId) => {
     const stats = await invoke<OutcomeStats[]>("get_outcome_stats_cmd", { projectId, agentId });
     set({ outcomeStats: stats ?? [] });
@@ -117,6 +130,15 @@ export const useIntelligenceStore = create<IntelligenceStore>((set) => ({
     const result = await invoke<FailureAnalysis>("create_failure_analysis_cmd", { sessionId, ptyExcerpt });
     set((state) => ({ failureAnalyses: [result, ...state.failureAnalyses] }));
     return result;
+  },
+
+  diagnoseFailure: async (analysisId, diagnosis, rootCause, suggestedFix) => {
+    return await invoke<number>("diagnose_failure_cmd", {
+      analysisId,
+      diagnosis,
+      rootCause,
+      suggestedFix,
+    });
   },
 
   getFailureAnalyses: async (sessionId, limit) => {

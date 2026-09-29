@@ -112,25 +112,46 @@ pub fn route_task(db: &Connection, task_desc: &str, task_type: &str, project_id:
 
     let _ = project_id;
 
-    // M2 (spec R20): re-rank by decision-derived confidence when a backend is available.
+    // M2 (spec R20): rank ALL agents by Jev's own probabilities when available.
     let cfg = crate::decision::get_decision_config(db).unwrap_or_default();
     let key = std::env::var("OPENROUTER_API_KEY").ok();
-    if (key.is_some() || cfg.backend == "local") && result.len() >= 2 {
-        let agents: Vec<String> = result.iter().map(|s| s.agent_id.clone()).collect();
-        let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
-        if let Ok(Some((best, conf))) = crate::decision::choose_agent(
-            &cfg,
-            &transport,
-            key.as_deref(),
-            task_desc,
-            &agents,
-            Some(db),
-        ) {
-            if let Some(pos) = result.iter().position(|s| s.agent_id == best) {
-                let mut chosen = result.remove(pos);
-                chosen.confidence = conf;
-                chosen.reasoning = format!("decision-layer pick (confidence {conf:.2})");
-                result.insert(0, chosen);
+    if key.is_some() || cfg.backend == "local" {
+        let mut agents: Vec<String> = result.iter().map(|s| s.agent_id.clone()).collect();
+        agents.sort();
+        agents.dedup(); // edge case #4: need ≥2 distinct labels
+        if agents.len() >= 2 {
+            let transport = crate::decision::UreqTransport { timeout_ms: cfg.timeout_ms };
+            if let Ok(Some(ranked)) = crate::decision::rank_agents(
+                &cfg,
+                &transport,
+                key.as_deref(),
+                task_desc,
+                &agents,
+                Some(db),
+            ) {
+                for s in result.iter_mut() {
+                    if let Some((_, p)) = ranked.iter().find(|(a, _)| *a == s.agent_id) {
+                        s.confidence = *p;
+                        s.reasoning = format!("decision probability {p:.2}");
+                    }
+                }
+                // R50: a top pick in the review band is enqueued, not silently applied.
+                if let Some((best, p)) = ranked.first() {
+                    if crate::decision::policy_action(&cfg, *p)
+                        == crate::decision::PolicyAction::Review
+                    {
+                        let payload =
+                            serde_json::json!({ "task": task_desc }).to_string();
+                        let _ = crate::decision::enqueue_review(
+                            db, "routing", "agent", best, *p, &payload,
+                        );
+                    }
+                }
+                result.sort_by(|a, b| {
+                    b.confidence
+                        .partial_cmp(&a.confidence)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
         }
     }
