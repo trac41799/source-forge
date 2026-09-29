@@ -67,7 +67,9 @@ pub fn set_decision_config(conn: &Connection, cfg: &DecisionConfig) -> Result<()
     }
     // Selecting "local" while retaining the hosted URL would silently send
     // local-intended traffic to OpenRouter — reject that misconfiguration.
-    if cfg.backend == "local" && cfg.base_url.trim_end_matches('/') == "https://openrouter.ai/api" {
+    // Match the whole openrouter.ai origin (any path/case), not just `/api`.
+    let local_url = cfg.base_url.trim().trim_end_matches('/').to_lowercase();
+    if cfg.backend == "local" && local_url.starts_with("https://openrouter.ai") {
         return Err(
             "backend=local requires changing base_url away from the hosted OpenRouter URL".into(),
         );
@@ -456,7 +458,7 @@ pub fn enqueue_review(
 ) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     // R-15: one row per (consumer, question, decided_value) — re-deciding the same
-    // thing reuses the existing review (requires migration 017's unique index).
+    // thing reuses the existing review (requires migration 019's unique index).
     let changed = conn
         .execute(
             "INSERT OR IGNORE INTO decision_reviews (id, consumer, question, decided_value, confidence, payload)
@@ -698,7 +700,9 @@ fn record_failure_usage(
 
 /// A simple circuit breaker: opens after `threshold` consecutive failures for
 /// `cooldown_ms`, and also once cumulative spend reaches `cap_micros`
-/// (`cap_micros == 0` disables the spend cap).
+/// (`cap_micros == 0` disables the spend cap). Reaching the spend cap is a
+/// **permanent** stop for the process — `open_until_ms` is set but `is_open`
+/// stays true while `spent_micros >= cap_micros`.
 #[derive(Debug, Clone)]
 pub struct Breaker {
     pub threshold: u32,
@@ -754,17 +758,26 @@ impl Breaker {
 fn global_breaker() -> &'static std::sync::Mutex<Breaker> {
     static B: std::sync::OnceLock<std::sync::Mutex<Breaker>> = std::sync::OnceLock::new();
     B.get_or_init(|| {
-        let num = |k: &str, d: u64| {
-            std::env::var(k)
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(d)
-        };
-        std::sync::Mutex::new(Breaker::new(
-            num("ACC_DECISION_BREAKER_THRESHOLD", 5) as u32,
-            num("ACC_DECISION_BREAKER_COOLDOWN_MS", 30_000),
-            num("ACC_DECISION_COST_CAP_MICROS", 5_000_000),
-        ))
+        // L5: unit tests must not share/accumulate breaker state across tests
+        // (order-dependent flakes) — make the global breaker inert under `cfg(test)`.
+        #[cfg(test)]
+        {
+            std::sync::Mutex::new(Breaker::new(u32::MAX, 0, 0))
+        }
+        #[cfg(not(test))]
+        {
+            let num = |k: &str, d: u64| {
+                std::env::var(k)
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(d)
+            };
+            std::sync::Mutex::new(Breaker::new(
+                num("ACC_DECISION_BREAKER_THRESHOLD", 5) as u32,
+                num("ACC_DECISION_BREAKER_COOLDOWN_MS", 30_000),
+                num("ACC_DECISION_COST_CAP_MICROS", 5_000_000),
+            ))
+        }
     })
 }
 
@@ -1652,6 +1665,18 @@ mod tests {
         let mut cfg = DecisionConfig::default();
         cfg.backend = "local".into(); // base_url still the hosted default
         assert!(set_decision_config(&conn, &cfg).is_err());
+        // L9: any openrouter.ai origin (path/case/spacing variants) must be rejected.
+        for hosted in [
+            "https://openrouter.ai/api/v1",
+            "https://openrouter.ai/",
+            "  HTTPS://OpenRouter.AI/api  ",
+        ] {
+            cfg.base_url = hosted.into();
+            assert!(
+                set_decision_config(&conn, &cfg).is_err(),
+                "{hosted} must be rejected for backend=local"
+            );
+        }
         cfg.base_url = "http://127.0.0.1:8009".into();
         assert!(set_decision_config(&conn, &cfg).is_ok());
     }

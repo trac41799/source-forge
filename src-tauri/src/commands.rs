@@ -42,15 +42,6 @@ pub struct AppState {
     pub memory_anti_thrashing: Mutex<HashMap<String, (i64, bool)>>,
 }
 
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new(
-            Connection::open(":memory:").unwrap(),
-            std::path::PathBuf::from(":memory:"),
-        )
-    }
-}
-
 impl AppState {
     pub fn new(db: Connection, db_path: std::path::PathBuf) -> Self {
         Self {
@@ -152,7 +143,7 @@ pub async fn list_worktrees_cmd(
     worktree::list_worktrees(&repo_path)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn parse_handoff_file_cmd(
     state: State<'_, AppState>,
     path: String,
@@ -471,7 +462,7 @@ pub async fn record_outcome_cmd(
 
 /// M2 (spec R21): infer the outcome via the decision layer (keyword fallback),
 /// then record it — makes `suggest_outcome_decision` reachable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn infer_outcome_cmd(
     state: State<'_, AppState>,
     session_id: String,
@@ -498,7 +489,7 @@ pub async fn get_outcome_stats_cmd(
     intelligence::get_outcome_stats(&db, project_id.as_deref(), agent_id.as_deref())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn create_failure_analysis_cmd(
     state: State<'_, AppState>,
     session_id: String,
@@ -511,7 +502,7 @@ pub fn create_failure_analysis_cmd(
 
 /// M2 (spec R23): compute a decision-derived confidence and persist the diagnosis —
 /// makes `failure_confidence_decision` + `update_failure_diagnosis` reachable.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn diagnose_failure_cmd(
     state: State<'_, AppState>,
     analysis_id: String,
@@ -618,7 +609,7 @@ pub async fn run_heartbeat_check_cmd(
 // Phase 4: Routing Commands
 // ============================================================================
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn route_task_cmd(state: State<'_, AppState>, task_desc: String, task_type: String, project_id: Option<String>) -> Result<Vec<routing::TaskSuggestion>, String> {
     // R-1: independent connection — `route_task` ranks via the decision layer.
     let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
@@ -762,7 +753,7 @@ pub async fn seed_wave_from_spec_cmd(
 
 // ── Deployment Verification Phase (Wave 5) ───────────────────────────
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn verify_project_cmd(
     project_path: String,
     state: State<'_, AppState>,
@@ -863,7 +854,7 @@ pub async fn set_decision_config_cmd(
     crate::decision::set_decision_config(&db, &config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn decision_health_cmd(state: State<'_, AppState>) -> Result<String, String> {
     // R-1: independent connection — the probe performs an HTTP round-trip.
     let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
@@ -1221,7 +1212,8 @@ pub async fn create_budget_cmd(
     state: State<'_, AppState>,
     input: budget::BudgetInput,
 ) -> Result<budget::AgentBudget, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — `create_budget` calls `choose_complexity` (HTTP).
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     budget::create_budget(&db, &input)
 }
 
@@ -1385,7 +1377,7 @@ pub async fn delete_knowledge_item_cmd(
 
 /// R-13 (#3): LLM entity/relation extraction persisted with decision-layer typing.
 /// The caller supplies the session events + diffs.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn run_kg_extraction_cmd(
     state: State<'_, AppState>,
     session_events: String,
@@ -1412,7 +1404,8 @@ pub async fn compound_knowledge_cmd(
     state: State<'_, AppState>,
     project_id: Option<String>,
 ) -> Result<Vec<knowledge::KnowledgeItem>, String> {
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — `compound_knowledge` re-tags via the decision layer (HTTP).
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     knowledge::compound_knowledge(&db, project_id.as_deref())
 }
 

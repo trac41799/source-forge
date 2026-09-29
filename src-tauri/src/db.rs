@@ -58,13 +58,16 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// R-14: error if any decision-layer table is absent after migrations.
+/// R-14: error if any decision-layer table (or the R-12 `input_hash` column) is
+/// absent after migrations — otherwise every usage write silently no-ops.
 fn assert_decision_tables(conn: &Connection) -> Result<()> {
     for table in ["decision_usage", "decision_reviews", "decision_config"] {
         conn.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| {
             r.get::<_, i64>(0)
         })?;
     }
+    // `prepare` validates the column exists without requiring a row.
+    conn.prepare("SELECT input_hash FROM decision_usage LIMIT 1")?;
     Ok(())
 }
 
@@ -109,9 +112,9 @@ pub fn init_db_path(db_path: &PathBuf) -> Result<Connection> {
 mod tests {
     use super::*;
 
-    /// R-14: a missing decision table must be a hard error, not a silent skip.
+    /// R-14/R-12: missing tables *or* the `input_hash` column must be a hard error.
     #[test]
-    fn missing_decision_table_fails_loudly() {
+    fn missing_decision_schema_fails_loudly() {
         let conn = Connection::open_in_memory().unwrap();
         assert!(
             assert_decision_tables(&conn).is_err(),
@@ -122,8 +125,14 @@ mod tests {
         conn.execute_batch(include_str!("../migrations/019_decision_reviews_unique.sql"))
             .unwrap();
         assert!(
+            assert_decision_tables(&conn).is_err(),
+            "tables exist but input_hash column missing (020 not applied) → error"
+        );
+        conn.execute_batch(include_str!("../migrations/020_decision_usage_hash.sql"))
+            .unwrap();
+        assert!(
             assert_decision_tables(&conn).is_ok(),
-            "tables present → ok"
+            "full decision schema → ok"
         );
     }
 

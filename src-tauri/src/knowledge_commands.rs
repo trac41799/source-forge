@@ -41,7 +41,9 @@ pub async fn run_compounder_cmd(
     )
     .await?;
 
-    let db = state.db.lock().map_err(|e| e.to_string())?;
+    // R-1: independent connection — `compounder_merge` detects contradictions
+    // via `judge_batch` (HTTP), so do not hold the shared lock here.
+    let db = crate::db::open_aux(&state.db_path).map_err(|e| e.to_string())?;
     crate::knowledge::compounder_merge(&db, &session_id, project_id.as_deref(), &content)
 }
 

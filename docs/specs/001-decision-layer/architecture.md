@@ -37,7 +37,7 @@ flowchart LR
   CORE -->|"base_url = <local>"| LOCAL
   CONS <--> DB
   CORE --> DB
-  DAEMON -->|"direct HTTP (separate path,\nno audit, no threshold band)"| OR
+  DAEMON -->|"direct HTTP (R-3: band + decision_usage audit)"| OR
   DAEMON -->|"direct HTTP"| LOCAL
   classDef ext fill:#eef,stroke:#88a
   class OR,JEV,LOCAL ext
@@ -143,7 +143,7 @@ sequenceDiagram
   participant DB as SQLite
 
   UI->>DB: state.db.lock()  (MutexGuard)
-  UI->>M: call(&Connection, …)   %% lock held for the whole call (risk R-1)
+  UI->>M: call(aux connection, …)   %% R-1: independent connection, no shared lock across HTTP
   M->>DB: read decision_config
   M->>D: decision_request(cfg, transport, state, questions, Some(&Connection))
   D->>D: truncate state → context_limit (R7; text only)
@@ -240,21 +240,21 @@ Auth: `OPENROUTER_API_KEY` from env/vault, never logged/bundled.
 
 | ID | Severity | Risk | Evidence | Disposition |
 |---|---|---|---|---|
-| R-1 | High | DB `MutexGuard` held across network I/O → app-wide DB stall up to `retries×timeout` | `commands.rs` + `decision_request` | **FIXED** — network-holding commands (route/verify/health/compounder/KG/outcome/failure/handoff) now use an independent connection via `db::open_aux` + `busy_timeout`, so the shared `Mutex<Connection>` is never held across HTTP |
-| R-2 | High | Sync `ureq` + `thread::sleep` called from `async` commands; fresh Agent per call | `decision.rs` `UreqTransport` | **FIXED** — one `ureq::Agent` reused per timeout (keep-alive); the blocking-network commands are now non-`async` so Tauri runs them off the async runtime |
+| R-1 | High | DB `MutexGuard` held across network I/O → app-wide DB stall up to `retries×timeout` | `commands.rs` + `decision_request` | **FIXED** — every network-holding command (route/verify/health/compound/compounder/budget/outcome/failure/handoff/KG) uses an independent connection via `db::open_aux` + `busy_timeout`, so the shared `Mutex<Connection>` is never held across HTTP |
+| R-2 | High | Sync `ureq` from `async` commands; fresh Agent per call | `decision.rs` `UreqTransport` | **FIXED** — one `ureq::Agent` reused per timeout (keep-alive); the blocking-network commands are `#[tauri::command(async)]` so Tauri runs them off the main thread |
 | R-3 | High | Daemon has a second path: own env config, no threshold band, no `decision_usage` audit | `local-daemon/router.py` | **FIXED** — daemon applies an env-configurable accept/review band (`policy_action`) and emits a `decision_usage` audit line |
 | R-4 | Med | Per-item calls (KG entities/relations, contradictions) → O(N)/O(N²) latency & cost | `kg_extraction.rs`, `knowledge.rs` | **FIXED** — `choose_batch`/`judge_batch` send all questions in one request (KG types+gate = 2, relations = 1, contradictions = 1 per item) |
 | R-5 | Med | Review enqueue not wired everywhere | `decision.rs::enqueue_review`, `routing.rs` | **FIXED** — routing + handoff (R-6) + contradiction review-band (`knowledge.rs`) all enqueue |
 | R-6 | Med | `semantic_handoff_confidence` unreachable | `handoff_parser.rs:114` | **FIXED** — wired into `parse_handoff_file_cmd` (+ review enqueue) |
 | R-7 | Med | R31 secrets `noul` inert — `verify_project_cmd` passes empty diff | `commands.rs` | **FIXED** — `verify_project_cmd` feeds `collect_worktree_diff` (`git diff HEAD`, 20k cap; empty for non-git) |
 | R-8 | Med | R7 "truncate" is enforced only for string state; structured state is rejected | `decision.rs` match arm | **FIXED (doc)** — R7 in `spec.md` now states structured `state` is rejected, not truncated |
-| R-9 | Low | `#[allow(dead_code)] mod decision;` masked not-yet-wired surface | `lib.rs` | **RESOLVED** — attribute removed; `decision.rs` emits zero dead-code warnings |
+| R-9 | Low | `#[allow(dead_code)] mod decision;` masked not-yet-wired surface | `lib.rs` | **RESOLVED** — attribute removed; `decision.rs` emits zero dead-code warnings. Note: `choose_agent`/`choose_entity_type`/`choose_relation_type` are now uncalled library helpers (kept as public API) |
 | R-10 | Low | No circuit breaker / cost ceiling; repeated 502s pay full retries × N items | live 502 observed; `decision.rs` loop | **FIXED** — circuit breaker (5 fails → 30 s open, resets on success) + $5 spend cap; short-circuits with a failure row |
 | R-11 | Low | `score` passed through verbatim (doc says weighted average) | `decision.rs` normalize; `decision-contract.md` | **FIXED (doc)** — contract corrected to "pass-through"; consumers derive tiers |
-| R-12 | Low | Decisions are not replayable (inputs not stored) → no "pristine vs prod" determinism test | `decision_usage` schema | **FIXED (hash-only)** — `input_hash` (FNV-1a of state+questions) recorded via migration 018; raw `state` still never stored |
+| R-12 | Low | Decisions are not replayable (inputs not stored) → no "pristine vs prod" determinism test | `decision_usage` schema | **FIXED (hash-only)** — `input_hash` (FNV-1a of state+questions) recorded via migration 020; raw `state` still never stored |
 | R-13 | Med | Unreachable integration points | §5 | **RESOLVED** — all 13 points reachable, 0 partial; #9 unblocked by R-7 |
 | R-14 | Med | Migration 016 failures are swallowed non-fatally while the layer hard-depends on the tables | `db.rs` | **FIXED** — `apply_migrations` calls `assert_decision_tables` and returns an error if any decision table is missing |
-| R-15 | Low | `decision_reviews` had no dedup/unique key → duplicates once enqueue is wired | `017_decision_reviews_unique.sql` | **FIXED** — UNIQUE(consumer,question,decided_value) + `INSERT OR IGNORE` (reuses existing id) |
+| R-15 | Low | `decision_reviews` had no dedup/unique key → duplicates once enqueue is wired | `019_decision_reviews_unique.sql` | **FIXED** — migration 019 collapses existing duplicates then adds UNIQUE(consumer,question,decided_value); `INSERT OR IGNORE` reuses the existing id |
 | R-16 | Low | Verification thresholds were inconsistent (README `accept` vs secrets `review`) | `verification.rs` | **FIXED** — both use `policy_action`; review-band results also enqueue (`verification.readme` / `verification.secrets`) |
 | R-17 | Low | `health_probe` maps auth/backend errors to "offline"; no "last success" | `decision.rs` `health_probe` | **FIXED** — backend/auth errors → "degraded" (offline only for transport/timeout); records `last_success_ms()` |
 | R-18 | Low | Local backend unusable from UI (no `base_url` field) | `DecisionPanel.tsx` | **FIXED** — `base_url` input added |
@@ -271,9 +271,9 @@ Auth: `OPENROUTER_API_KEY` from env/vault, never logged/bundled.
 
 ## 9. Value summary (one honest line)
 Jev provides schema-guaranteed, calibrated decisions at ~$0.00001/call through one swappable
-contract; today **5 points deliver value end-to-end** (routing now ranks *all* agents by Jev's own
-probabilities and enqueues review-band picks), 2 partially, and **6 are implemented but not yet
-reachable** — closing R-13 is the main outstanding work.
+contract; today **all 13 integration points are reachable** (routing ranks *all* agents by Jev's
+own probabilities and enqueues review-band picks; compounder, KG typing, verification, handoff and
+contradiction are wired) — R-13 is closed (`architecture.md §5`).
 
 ## 10. ADR links
 - ADR 0001 — one decision adapter, hosted Jev default, local option

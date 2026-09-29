@@ -45,6 +45,19 @@ export const IPC = {
   inferOutcome: "infer_outcome_cmd",
   diagnoseFailure: "diagnose_failure_cmd",
 
+  // Intelligence / agent outcomes
+  recordOutcome: "record_outcome_cmd",
+  getOutcomeStats: "get_outcome_stats_cmd",
+  createFailureAnalysis: "create_failure_analysis_cmd",
+  getFailureAnalyses: "get_failure_analyses_cmd",
+  detectLimitEvent: "detect_limit_event_cmd",
+  recordLimitEvent: "record_limit_event_cmd",
+  resolveLimitEvent: "resolve_limit_event_cmd",
+  getUnresolvedLimits: "get_unresolved_limits_cmd",
+  recordTokenUsage: "record_token_usage_cmd",
+  getTokenUsageStats: "get_token_usage_stats_cmd",
+  runHeartbeatCheck: "run_heartbeat_check_cmd",
+
   // Skills / project
   checkSkillbridge: "check_skillbridge",
 

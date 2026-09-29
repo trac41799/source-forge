@@ -159,3 +159,100 @@ class TestAuditDecision:
         assert "decision_usage" in joined
         payload = joined.split("decision_usage ", 1)[1]
         assert _json.loads(payload)["confidence"] == 0.91
+
+
+def _install_fake_httpx(monkeypatch, payload):
+    """Inject a fake `httpx` module so route_with_decision needs no real HTTP."""
+    import sys
+    import types
+
+    calls = {"n": 0, "body": None}
+
+    class _Resp:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return payload
+
+    class _Client:
+        def __init__(self, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, url, json=None, headers=None):
+            calls["n"] += 1
+            calls["body"] = json
+            return _Resp()
+
+    fake = types.ModuleType("httpx")
+    fake.AsyncClient = _Client
+    monkeypatch.setitem(sys.modules, "httpx", fake)
+    return calls
+
+
+class TestRouteWithDecisionBand:
+    """L4: the band decision path in route_with_decision must be exercised."""
+
+    @staticmethod
+    def _ctx():
+        from types import SimpleNamespace
+
+        return SimpleNamespace(text="hi", sender_name="a", platform="lark")
+
+    @staticmethod
+    def _project():
+        return {"agents": [{"id": "b", "description": "B"}]}
+
+    def _run(self, monkeypatch, payload):
+        import asyncio
+
+        from router import route_with_decision
+
+        monkeypatch.setenv("DECISION_BASE_URL", "http://127.0.0.1:8009")
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        monkeypatch.delenv("DECISION_ACCEPT_THRESHOLD", raising=False)
+        monkeypatch.delenv("DECISION_REVIEW_THRESHOLD", raising=False)
+        calls = _install_fake_httpx(monkeypatch, payload)
+        result = asyncio.run(route_with_decision(self._ctx(), self._project()))
+        return result, calls
+
+    def test_apply_band_uses_decision(self, monkeypatch):
+        result, calls = self._run(
+            monkeypatch,
+            {"answers": {"agent": {"type": "choice", "choice": "b", "confidence": 0.9}}},
+        )
+        assert result == ("b", 0.9)
+        assert calls["n"] == 1, "exactly one decision request"
+
+    def test_review_band_falls_back(self, monkeypatch):
+        result, _ = self._run(
+            monkeypatch,
+            {"answers": {"agent": {"type": "choice", "choice": "b", "confidence": 0.5}}},
+        )
+        assert result is None, "review band must fall back to the prompt router"
+
+    def test_skip_band_falls_back(self, monkeypatch):
+        result, _ = self._run(
+            monkeypatch,
+            {"answers": {"agent": {"type": "choice", "choice": "b", "confidence": 0.2}}},
+        )
+        assert result is None
+
+    def test_none_choice_returns_none_agent(self, monkeypatch):
+        result, _ = self._run(
+            monkeypatch,
+            {"answers": {"agent": {"type": "choice", "choice": "none", "confidence": 0.9}}},
+        )
+        assert result == (None, 0.9), "explicit 'none' is preserved (not a fallback)"
+
+    def test_malformed_response_returns_none(self, monkeypatch):
+        result, _ = self._run(monkeypatch, {})
+        assert result is None

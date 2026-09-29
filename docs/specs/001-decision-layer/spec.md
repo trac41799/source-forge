@@ -69,7 +69,7 @@ product's confidence numbers real.
   consumer, created_at, resolved). *AC:* a review-band **routing** decision creates
   exactly one review row; handoff and contradiction review-band decisions also enqueue
   (R-5/R-6); duplicate `(consumer, question, decided_value)` reviews are deduplicated
-  (migration 017, R-15).
+  (migration 019, R-15).
 
 ### B. Tier 1 — replace brittle classification
 - **R10** WHEN an inbound chat message is routed THEN the agent SHALL be a `choice` over
@@ -121,7 +121,7 @@ product's confidence numbers real.
   THEN the system SHALL enqueue review rather than act silently; consumers without a
   review path SHALL fall back (R51). *AC:* band = [review_threshold, accept_threshold);
   default [0.40, 0.75); a routing decision at 0.5 is enqueued to `decision_reviews`.
-  (Wired site: routing — handoff/contradiction deferred.)
+  (Wired sites: routing, handoff (R-6), contradiction (R-5), verification (R-16).)
 - **R51** WHEN no backend is available (offline, timeout, no model) THEN each consumer
   SHALL fall back to its documented prior behavior and record the degradation — never
   block an agent session. *AC:* the offline fallback matrix

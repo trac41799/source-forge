@@ -5,7 +5,7 @@
 ## Fixes
 | Risk | Fix | File(s) | Test (RED → GREEN) |
 |---|---|---|---|
-| **R-15** | Review queue deduped: migration `017` adds `UNIQUE(consumer,question,decided_value)`; `enqueue_review` uses `INSERT OR IGNORE` and reuses the existing id | `migrations/017_decision_reviews_unique.sql`, `db.rs`, `decision.rs` | `enqueue_review_is_idempotent_for_same_decision` — RED: *UNIQUE constraint failed* on the 2nd insert |
+| **R-15** | Review queue deduped: migration `019` adds `UNIQUE(consumer,question,decided_value)`; `enqueue_review` uses `INSERT OR IGNORE` and reuses the existing id | `migrations/019_decision_reviews_unique.sql`, `db.rs`, `decision.rs` | `enqueue_review_is_idempotent_for_same_decision` — RED: *UNIQUE constraint failed* on the 2nd insert |
 | **R-7** | `verify_project_cmd` now feeds `collect_worktree_diff` (`git diff HEAD --no-color`, 20 000-char cap, empty for non-git) → the semantic **secrets** check actually runs | `verification.rs`, `commands.rs` | `collect_worktree_diff_empty_for_non_git_dir` — RED: `cannot find function collect_worktree_diff` |
 | **R-5** | Contradiction detection now also **enqueues a review** when the model lands in the review band (transport + api-key injected for testability) | `knowledge.rs` (`detect_and_record_contradictions`) | `contradiction_in_review_band_enqueues_review` — RED (observed): `left: 0, right: 1` |
 | **R-9** | Removed `#[allow(dead_code)] mod decision;` — no `decision.rs` dead-code warnings remain | `lib.rs` | build check: 0 warnings referencing `decision.rs` |
