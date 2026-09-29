@@ -42,6 +42,8 @@ mod wave_persistence;
 mod integration_tests;
 #[cfg(test)]
 mod real_pipeline_test;
+#[cfg(test)]
+mod decision_fallback_tests;
 mod stack_registry;
 mod preferences;
 mod provisioner;

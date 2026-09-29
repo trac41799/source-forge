@@ -73,29 +73,6 @@ impl VerificationReport {
     }
 }
 
-/// Best-effort worktree diff for the semantic secrets check (R-7). Returns an
-/// empty string when the path is not a git repository or `git` is unavailable,
-/// so the deterministic checks stay unaffected.
-pub fn collect_worktree_diff(project_path: &str) -> String {
-    if !std::path::Path::new(project_path).join(".git").exists() {
-        return String::new();
-    }
-    std::process::Command::new("git")
-        .arg("-C")
-        .arg(project_path)
-        .args(["diff", "HEAD", "--no-color", "--unified=0"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| {
-            String::from_utf8_lossy(&o.stdout)
-                .chars()
-                .take(20_000)
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
 /// M3 (spec R31): additive semantic checks via the decision layer. Returns an
 /// empty vec when no backend is configured (deterministic checks are unaffected).
 pub fn semantic_checks(
@@ -1342,14 +1319,50 @@ mod tests {
         assert!(!report.passed);
     }
 
-    // ── R-7: worktree diff feeds the semantic secrets check ──────────────
+    // ── R31: the wave diff drives the semantic secrets check ────────────
     #[test]
-    fn collect_worktree_diff_empty_for_non_git_dir() {
-        let dir = std::env::temp_dir().join(format!("acc-nogit-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let diff = collect_worktree_diff(&dir.to_string_lossy());
-        assert!(diff.is_empty(), "non-git dir must yield an empty diff");
-        let _ = std::fs::remove_dir_all(&dir);
+    fn wave_diff_review_band_checks_secrets() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/016_decision_usage.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/019_decision_reviews_unique.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../migrations/020_decision_usage_hash.sql"))
+            .unwrap();
+        let cfg = crate::decision::DecisionConfig::default();
+        let t = SemTransport {
+            payload: serde_json::json!({
+                "model": "m",
+                "answers": { "has_secrets": { "type": "noul", "noul": 0.5 } },
+                "usage": { "input_tokens": 1, "cost": 0.0 }
+            }),
+        };
+        // readme = None → only the secrets check runs, and only because the
+        // wave diff is non-empty (a project-tree diff must NOT be used here).
+        let checks = semantic_checks_with(
+            &cfg,
+            &t,
+            Some("k"),
+            &conn,
+            None,
+            "diff --git a/.env b/.env\n+TOKEN=abc",
+        );
+        assert!(
+            checks.iter().any(|c| c.name.contains("secrets")),
+            "secrets check must run on a non-empty wave diff"
+        );
+        let n: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM decision_reviews WHERE consumer = 'verification.secrets'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "review-band secrets → enqueued");
+
+        // With no wave diff the secrets check must not run at all.
+        let none = semantic_checks_with(&cfg, &t, Some("k"), &conn, None, "");
+        assert!(!none.iter().any(|c| c.name.contains("secrets")));
     }
 
     // ── R-16: verification review-band enqueue ─────────────────────────────

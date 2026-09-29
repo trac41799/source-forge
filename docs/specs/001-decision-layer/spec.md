@@ -105,7 +105,9 @@ product's confidence numbers real.
 - **R31** WHEN deployment verification runs THEN semantic `noul` checks SHALL be added
   (README explains setup? secrets present in the **wave diff**?) **alongside** the
   deterministic checks. *AC:* the semantic secret check inspects the wave's collected
-  diff (`HandoffEnvelope.diff_preview` / changed files), not the project source tree.
+  changes — each agent worktree's `git diff HEAD` plus untracked files **and gitignored
+  secret-named files** (`collect_wave_diff`, bounded) — never the project source tree; it runs
+  on the wave path (`verify_and_finalize_wave_cmd` → `finalize_wave_with_verify`).
 
 ### E. Tier 4 — flywheel quality
 - **R40** WHEN two knowledge items are compared THEN same-insight/contradiction SHALL be
@@ -125,7 +127,12 @@ product's confidence numbers real.
 - **R51** WHEN no backend is available (offline, timeout, no model) THEN each consumer
   SHALL fall back to its documented prior behavior and record the degradation — never
   block an agent session. *AC:* the offline fallback matrix
-  (`implementation-details/decision-contract.md`) passes as an integration test.
+  (`implementation-details/decision-contract.md`) is covered by
+  `src-tauri/src/decision_fallback_tests.rs` for the transport-seam consumers (core,
+  deployment verify, KG typing, contradiction); the remaining rows (outcome, budget, failure
+  confidence, handoff, route_task, daemon) rely on their **implementation** fallbacks and are
+  verified by inspection, not tests; a fallback also records a `decision_usage` row
+  (`policy_outcome='fallback'`).
 - **R52** WHEN configuring backends THEN Settings SHALL allow hosted/local selection and
   display health. *AC:* health check = a live probe (empty `state`, one `noul` question
   "is this endpoint reachable") carrying no real data, or last success < 10 min; shows
@@ -149,7 +156,7 @@ Reachability is authoritative in `architecture.md §5`.
 
 | State | Requirements |
 |---|---|
-| **Delivered (reachable)** | R1–R8, R10–R12, R20–R23, R30, R40, R41, R50, R52, R53 |
+| **Delivered (reachable)** | R1–R8, R10–R12, R20–R23, R30, R31, R40, R41, R50, R51, R52, R53 |
 | **Partial** | none |
 | **Deferred** | none — all integration points wired (`architecture.md §5`); all High risks mitigated (`review-round7.md`) |
 

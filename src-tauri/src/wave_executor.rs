@@ -202,18 +202,195 @@ pub async fn finalize_wave(
     Ok(report)
 }
 
-/// Finalize a wave WITH deployment verification.
-/// After agents finish, runs project verification and includes results.
+/// True for file names that commonly hold credentials (used only for the
+/// *gitignored* file list, where a committed `.gitignore` usually hides `.env`).
+fn looks_secret(name: &str) -> bool {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_lowercase();
+    base.starts_with(".env")
+        || base.contains("secret")
+        || base.contains("credential")
+        || base == "id_rsa"
+        || base == "id_ed25519"
+        || [".pem", ".key", ".p12", ".pfx", ".keystore", ".jks"]
+            .iter()
+            .any(|e| base.ends_with(e))
+}
+
+/// Skip vendored/generated directories so the scan stays small.
+fn is_noise(path: &str) -> bool {
+    const NOISE: &[&str] = &[
+        "node_modules/",
+        "target/",
+        "dist/",
+        ".next/",
+        "build/",
+        "out/",
+        ".git/",
+        "__pycache__/",
+        ".venv/",
+        "venv/",
+    ];
+    NOISE
+        .iter()
+        .any(|n| path.starts_with(n) || path.contains(&format!("/{n}")) || path.contains(&format!("\\{n}")))
+}
+
+/// Gitignored files that may hold credentials, as recursive pathspecs so the
+/// listing stays small (a plain `--ignored` list can be tens of thousands of lines).
+const SECRET_PATHSPECS: &[&str] = &[
+    ":(glob,icase)**/.env*",
+    ":(glob,icase)**/*.pem",
+    ":(glob,icase)**/*.key",
+    ":(glob,icase)**/*.p12",
+    ":(glob,icase)**/*.pfx",
+    ":(glob,icase)**/*.keystore",
+    ":(glob,icase)**/*.jks",
+    ":(glob,icase)**/*secret*",
+    ":(glob,icase)**/*credential*",
+    ":(glob,icase)**/id_rsa",
+    ":(glob,icase)**/id_ed25519",
+];
+
+/// Append one file's (bounded) body to `body` unless it is a symlink / non-file / too big.
+fn append_file_body(body: &mut String, root: &std::path::Path, f: &str, per_file: usize) {
+    let p = root.join(f);
+    let Ok(meta) = std::fs::symlink_metadata(&p) else {
+        return;
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() || meta.len() > (per_file as u64) * 4 {
+        return;
+    }
+    if let Ok(content) = std::fs::read_to_string(&p) {
+        body.push_str(&format!("\n# FILE {f}\n"));
+        body.extend(content.chars().take(per_file));
+    }
+}
+
+/// R31: collect the wave's **own** changes — each agent worktree's `git diff HEAD`
+/// plus untracked files (and *gitignored* files whose name looks secret-bearing,
+/// since `.gitignore` normally hides `.env`). Never the project source tree.
+///
+/// Bounded: 20 000 chars overall, 4 096 chars per file body, ≤200 files per
+/// worktree; the tracked diff is streamed and truncated, symlinks/large files are
+/// skipped, and the ignored listing is pathspec-limited.
+pub fn collect_wave_diff(report: &WaveExecutionReport) -> String {
+    const CAP: usize = 20_000;
+    const PER_FILE: usize = 4_096;
+    const MAX_FILES: usize = 200;
+    let mut out = String::new();
+
+    for agent in &report.agents {
+        if out.chars().count() >= CAP {
+            break;
+        }
+        if agent.worktree_path.is_empty() {
+            continue;
+        }
+        let root = std::path::Path::new(&agent.worktree_path);
+        if !root.join(".git").exists() {
+            continue;
+        }
+
+        let mut body = String::new();
+        // 1) tracked changes — streamed so a huge diff never buffers fully.
+        if let Ok(mut child) = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["diff", "HEAD", "--no-color", "--unified=0"])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            if let Some(stdout) = child.stdout.take() {
+                use std::io::Read;
+                let mut buf = Vec::with_capacity(4096);
+                let _ =
+                    std::io::BufReader::new(stdout).take(CAP as u64).read_to_end(&mut buf);
+                body.push_str(&String::from_utf8_lossy(&buf));
+            }
+            let _ = child.wait();
+        }
+
+        // 2) untracked (non-ignored) files, then gitignored secret-named files.
+        // The secret filter runs BEFORE the MAX_FILES count so it can never be
+        // pushed out by unrelated ignored files.
+        let mut collected = 0usize;
+        let scan = |body: &mut String, collected: &mut usize, args: &[&str], secret_only: bool| {
+            let Ok(o) = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root)
+                .args(args)
+                .output()
+            else {
+                return;
+            };
+            if !o.status.success() {
+                return;
+            }
+            for f in String::from_utf8_lossy(&o.stdout).lines() {
+                if body.chars().count() >= CAP || *collected >= MAX_FILES {
+                    break;
+                }
+                if secret_only && !looks_secret(f) {
+                    continue;
+                }
+                if is_noise(f) {
+                    continue;
+                }
+                *collected += 1;
+                append_file_body(body, root, f, PER_FILE);
+            }
+        };
+        // Secrets FIRST: a flood of untracked files must not starve the secret scan.
+        {
+            let mut args = vec!["ls-files", "--others", "--ignored", "--exclude-standard", "--"];
+            args.extend_from_slice(SECRET_PATHSPECS);
+            scan(&mut body, &mut collected, &args, true);
+        }
+        if body.chars().count() < CAP && collected < MAX_FILES {
+            scan(
+                &mut body,
+                &mut collected,
+                &["ls-files", "--others", "--exclude-standard", "--"],
+                false,
+            );
+        }
+
+        // Only emit an agent section when there is actually something to scan.
+        if !body.is_empty() {
+            out.push_str(&format!("\n# {}\n", agent.agent_ref));
+            let remaining = CAP.saturating_sub(out.chars().count());
+            out.extend(body.chars().take(remaining));
+        }
+    }
+    out
+}
+
+/// Finalize a wave WITH deployment verification (R31): the deterministic checks
+/// plus semantic checks fed by the **wave's collected diff** (R-1: the semantic
+/// call uses an independent connection, so the shared lock is never held across HTTP).
 pub async fn finalize_wave_with_verify(
     db: &Mutex<Connection>,
     report: WaveExecutionReport,
     project_path: &str,
+    db_path: &std::path::Path,
 ) -> Result<serde_json::Value, String> {
     let wave_report = finalize_wave(db, report).await?;
-    let verify_report = crate::verification::verify_project(std::path::Path::new(project_path));
+    let wave_diff = collect_wave_diff(&wave_report);
+    let mut verify = crate::verification::verify_project(std::path::Path::new(project_path));
+    if let Ok(conn) = crate::db::open_aux(db_path) {
+        let readme =
+            std::fs::read_to_string(std::path::Path::new(project_path).join("README.md")).ok();
+        let semantic = crate::verification::semantic_checks(&conn, readme.as_deref(), &wave_diff);
+        verify.extend_with(semantic);
+    }
     Ok(serde_json::json!({
         "wave": wave_report,
-        "verification": verify_report
+        "verification": verify
     }))
 }
 
@@ -795,5 +972,157 @@ mod tests {
         assert!(merges.skipped[0].detail.contains("failed"));
         // Its worktree is left in place for inspection.
         assert!(Path::new(&report.agents[0].worktree_path).exists());
+    }
+
+    /// R31: the wave diff is each agent worktree's own changes — tracked, untracked,
+    /// and gitignored secret files — never the project tree.
+    #[test]
+    fn collect_wave_diff_gathers_agent_worktree_changes() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        // A committed .gitignore hides the new .env — the canonical secret case.
+        std::fs::write(format!("{path}/.gitignore"), ".env\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "gitignore"]);
+
+        std::fs::write(format!("{path}/README.md"), "x\nchanged\n").unwrap(); // tracked
+        std::fs::write(format!("{path}/notes.txt"), "hello").unwrap(); // untracked
+        std::fs::write(format!("{path}/.env"), "API_TOKEN=supersecret").unwrap(); // ignored+secret
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "frontend".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(diff.contains("# frontend"), "agent header present");
+        assert!(diff.contains("changed"), "tracked change included");
+        assert!(diff.contains("notes.txt"), "untracked file included");
+        assert!(
+            diff.contains("API_TOKEN=supersecret"),
+            "gitignored .env must still be collected"
+        );
+    }
+
+    #[test]
+    fn collect_wave_diff_empty_without_agents() {
+        assert!(collect_wave_diff(&WaveExecutionReport::default()).is_empty());
+    }
+
+    /// Regression (review F1): a flood of ignored files must not push a secret
+    /// `.env` out of the scan.
+    #[test]
+    fn collect_wave_diff_finds_env_among_many_ignored_files() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        std::fs::write(format!("{path}/.gitignore"), ".env\n.cache/\n").unwrap();
+        std::fs::create_dir_all(format!("{path}/.cache")).unwrap();
+        for i in 0..250 {
+            std::fs::write(format!("{path}/.cache/f{i}.txt"), "x").unwrap();
+        }
+        std::fs::write(format!("{path}/.env"), "API_TOKEN=supersecret").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "gitignore"]);
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "a".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(
+            diff.contains("API_TOKEN=supersecret"),
+            "ignored .env must be found despite many ignored files"
+        );
+    }
+
+    /// Regression (review): case variants and `.envrc` must be found — the
+    /// pathspec is case-insensitive and matches `.env*`.
+    #[test]
+    fn collect_wave_diff_finds_case_and_envrc_secrets() {
+        let repo = create_test_repo();
+        let path = repo.path().to_str().unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(path)
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        std::fs::write(format!("{path}/.gitignore"), ".envrc\n.ENV\n").unwrap();
+        git(&["add", ".gitignore"]);
+        git(&["commit", "-m", "gitignore"]);
+        std::fs::write(format!("{path}/.envrc"), "export DIRENV_TOKEN=abc").unwrap();
+        std::fs::write(format!("{path}/.ENV"), "API_TOKEN=xyz").unwrap();
+
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "a".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: path.to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        let diff = collect_wave_diff(&report);
+        assert!(diff.contains("DIRENV_TOKEN=abc"), ".envrc must be collected");
+        assert!(diff.contains("API_TOKEN=xyz"), "case-variant .ENV must be collected");
+    }
+
+    /// A worktree with no changes must not emit a header (no spurious secrets call).
+    #[test]
+    fn collect_wave_diff_skips_worktrees_without_changes() {
+        let repo = create_test_repo();
+        let report = WaveExecutionReport {
+            agents: vec![AgentExecution {
+                agent_ref: "frontend".to_string(),
+                session_id: "s".to_string(),
+                worktree_path: repo.path().to_str().unwrap().to_string(),
+                branch: "b".to_string(),
+                status: "done".to_string(),
+                guideline_path: String::new(),
+                cost_usd: 0.0,
+                retry_count: 0,
+            }],
+            ..Default::default()
+        };
+        assert!(collect_wave_diff(&report).is_empty());
     }
 }
