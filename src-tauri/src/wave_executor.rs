@@ -598,7 +598,7 @@ pub struct MergeReport {
     pub skipped: Vec<MergeRecord>,
 }
 
-fn git(args: &[&str]) -> Result<(bool, String), String> {
+pub(crate) fn git(args: &[&str]) -> Result<(bool, String), String> {
     let output = std::process::Command::new("git")
         .args(args)
         .output()
@@ -608,7 +608,7 @@ fn git(args: &[&str]) -> Result<(bool, String), String> {
     Ok((output.status.success(), text.trim().to_string()))
 }
 
-fn git_or_err(args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_or_err(args: &[&str]) -> Result<String, String> {
     let (ok, text) = git(args)?;
     if ok {
         Ok(text)
@@ -628,6 +628,7 @@ pub fn merge_completed_agents(
     base_branch: &str,
 ) -> MergeReport {
     let mut result = MergeReport::default();
+    let mut delivered: Vec<String> = Vec::new();
 
     // Merge into the intended branch regardless of what is currently checked out.
     let (ok, head) = git(&["-C", base_repo, "rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or((false, String::new()));
@@ -676,9 +677,10 @@ pub fn merge_completed_agents(
         //
         //    `.acc/` (GUIDELINE.md, TASK.md) is pipeline bookkeeping, not
         //    deliverable: every agent's copy differs, so committing it made every
-        //    second agent conflict on add/add. Excluded via pathspec rather than
-        //    touching the user's git config.
-        const EXCLUDE_BOOKKEEPING: [&str; 2] = [".", ":(exclude).acc"];
+        //    second agent conflict on add/add. The HANDOFF_*.md files are the
+        //    same class of bookkeeping (one per agent, never a deliverable).
+        //    Excluded via pathspec rather than touching the user's git config.
+        const EXCLUDE_BOOKKEEPING: [&str; 3] = [".", ":(exclude).acc", ":(exclude)HANDOFF_*.md"];
         let (_, status) = match git(&[
             "-C",
             &agent.worktree_path,
@@ -687,6 +689,7 @@ pub fn merge_completed_agents(
             "--",
             EXCLUDE_BOOKKEEPING[0],
             EXCLUDE_BOOKKEEPING[1],
+            EXCLUDE_BOOKKEEPING[2],
         ]) {
             Ok(value) => value,
             Err(error) => {
@@ -711,6 +714,7 @@ pub fn merge_completed_agents(
                 "--",
                 EXCLUDE_BOOKKEEPING[0],
                 EXCLUDE_BOOKKEEPING[1],
+                EXCLUDE_BOOKKEEPING[2],
             ])
             .and_then(|_| {
                 git_or_err(&[
@@ -750,13 +754,93 @@ pub fn merge_completed_agents(
             result.conflicts.push(record(commit, format!("merge failed: {error}")));
             continue;
         }
+        // Files this merge delivered (first-parent diff of the merge commit).
+        if let Ok((true, files)) = git(&["-C", base_repo, "diff", "--name-only", "HEAD~1", "HEAD"]) {
+            delivered.extend(files.lines().map(|file| file.trim_matches('"').to_string()));
+        }
 
         // 3. Only now is the worktree disposable.
         let _ = git(&["-C", base_repo, "worktree", "remove", "--force", &agent.worktree_path]);
         result.merged.push(record(commit, format!("merged into {base_branch}")));
     }
 
+    // Guard against silent loss: files the merges just delivered must be
+    // present in the working tree. Observed once in the wild (merged files
+    // present in the commit but missing on disk with staged deletions); a loud
+    // conflict the operator can inspect beats a quiet success.
+    if !delivered.is_empty() {
+        if let Ok((true, status)) = git(&["-C", base_repo, "status", "--porcelain"]) {
+            let mut lost = Vec::new();
+            for line in status.lines() {
+                let bytes = line.as_bytes();
+                if bytes.len() > 3 && (bytes[0] == b'D' || bytes[1] == b'D') {
+                    let path = line[3..].trim().trim_matches('"').to_string();
+                    if delivered.iter().any(|file| file == &path) {
+                        lost.push(path);
+                    }
+                }
+            }
+            if !lost.is_empty() {
+                result.conflicts.push(MergeRecord {
+                    agent_ref: "post-merge".to_string(),
+                    branch: base_branch.to_string(),
+                    commit: None,
+                    detail: format!(
+                        "merged files missing from the working tree: {}",
+                        lost.join(", ")
+                    ),
+                });
+            }
+        }
+    }
+
     result
+}
+
+/// Commit pipeline-generated scaffold output into the base branch.
+///
+/// Agent worktrees branch from the base branch *after* scaffolding, so files
+/// the scaffold wrote but nobody committed are invisible to every agent
+/// (observed: an agent reporting "no package manifest exists in this worktree").
+/// Stages exactly the scaffold's `files_created` list — unrelated user files
+/// are never touched.
+pub(crate) fn commit_scaffold_output(
+    project_path: &str,
+    stack_id: &str,
+    files_created: &[String],
+) -> Result<String, String> {
+    if !Path::new(project_path).join(".git").exists() {
+        return Ok("not a git repo — skipped scaffold commit".to_string());
+    }
+    if files_created.is_empty() {
+        return Ok("nothing scaffolded".to_string());
+    }
+    let mut add = vec!["-C", project_path, "add", "--"];
+    add.extend(files_created.iter().map(String::as_str));
+    git_or_err(&add)?;
+    let (_, status) = git(&["-C", project_path, "status", "--porcelain"])?;
+    if status.is_empty() {
+        return Ok("scaffold output already committed".to_string());
+    }
+    git_or_err(&[
+        "-C",
+        project_path,
+        "-c",
+        "user.name=SourceForge",
+        "-c",
+        "user.email=sourceforge@local",
+        "commit",
+        "-m",
+        &format!("scaffold: {stack_id} application skeleton"),
+    ])?;
+    let (ok, sha) = git(&["-C", project_path, "rev-parse", "HEAD"])?;
+    if !ok {
+        return Err("scaffold commit created but HEAD unreadable".to_string());
+    }
+    Ok(format!(
+        "scaffold committed ({})",
+        sha.chars().take(8).collect::<String>()
+    ))
 }
 
 #[cfg(test)]
@@ -1124,5 +1208,68 @@ mod tests {
             ..Default::default()
         };
         assert!(collect_wave_diff(&report).is_empty());
+    }
+
+    #[test]
+    fn test_merge_excludes_handoff_files_from_delivery() {
+        // HANDOFF_*.md is pipeline bookkeeping like .acc/: committing it leaked
+        // agent protocol files into the deliverable (observed in the wild).
+        let repo = create_test_repo();
+        let repo_path = repo.path().to_str().unwrap();
+        let agent = agent_worktree(&repo, "1-1", "src/work.ts", "export {};\n");
+        let wt = std::path::Path::new(&agent.worktree_path);
+        std::fs::write(wt.join("HANDOFF_1-1.md"), "## Completed Work\nok\n").unwrap();
+        let report = wave_report(vec![agent]);
+
+        let merges = merge_completed_agents(&report, repo_path, "main");
+
+        assert_eq!(merges.merged.len(), 1);
+        assert!(merges.conflicts.is_empty());
+        let (ok, files) = super::git(&["-C", repo_path, "diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
+        assert!(ok);
+        assert!(files.lines().any(|f| f == "src/work.ts"), "work delivered");
+        assert!(
+            !files.lines().any(|f| f.contains("HANDOFF")),
+            "handoff must not be delivered: {files}"
+        );
+        assert!(repo.path().join("src/work.ts").exists());
+    }
+
+    #[test]
+    fn test_commit_scaffold_output_commits_only_scaffold_files() {
+        let repo = create_test_repo();
+        let repo_path = repo.path().to_str().unwrap();
+        // Simulate scaffold output plus an unrelated user file.
+        std::fs::write(repo.path().join("package.json"), "{}\n").unwrap();
+        std::fs::write(repo.path().join("notes.txt"), "mine\n").unwrap();
+
+        let detail = commit_scaffold_output(
+            repo_path,
+            "nextjs-sqlite-vercel",
+            &["package.json".to_string()],
+        )
+        .unwrap();
+
+        assert!(detail.contains("scaffold committed"), "{detail}");
+        let (ok, files) = super::git(&["-C", repo_path, "diff", "--name-only", "HEAD~1", "HEAD"]).unwrap();
+        assert!(ok);
+        assert!(files.lines().any(|f| f == "package.json"));
+        assert!(!files.lines().any(|f| f == "notes.txt"), "user files untouched");
+        // And the user file is still there, uncommitted.
+        let (ok, status) = super::git(&["-C", repo_path, "status", "--porcelain"]).unwrap();
+        assert!(ok);
+        assert!(status.lines().any(|l| l.contains("notes.txt")), "still untracked: {status}");
+    }
+
+    #[test]
+    fn test_commit_scaffold_output_skips_non_repos() {
+        let dir = TempDir::new().unwrap();
+        let detail = commit_scaffold_output(
+            dir.path().to_str().unwrap(),
+            "nextjs-sqlite-vercel",
+            &["package.json".to_string()],
+        )
+        .unwrap();
+        assert!(detail.contains("not a git repo"), "{detail}");
     }
 }

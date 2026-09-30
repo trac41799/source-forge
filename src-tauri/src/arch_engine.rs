@@ -35,7 +35,7 @@ pub fn scaffold_project(
     };
 
     match stack.id.as_str() {
-        "nextjs-supabase-vercel" | "nextjs-prisma-vercel" => {
+        "nextjs-supabase-vercel" | "nextjs-prisma-vercel" | "nextjs-sqlite-vercel" => {
             scaffold_nextjs(base, project_name, stack, &mut report)?;
         }
         "express-react-supabase" => {
@@ -68,10 +68,27 @@ fn w(base: &Path, rel: &str, content: &str, r: &mut ScaffoldReport) -> Result<()
 }
 
 fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut ScaffoldReport) -> Result<(), String> {
+    let sqlite = stack.database == "sqlite";
+    let mut dependencies = serde_json::Map::new();
+    for (dep, version) in [
+        ("next", "^14.2.0"),
+        ("react", "^18.3.0"),
+        ("react-dom", "^18.3.0"),
+        ("@prisma/client", "^5.15.0"),
+        ("zod", "^3.23.0"),
+    ] {
+        dependencies.insert(dep.to_string(), serde_json::Value::String(version.to_string()));
+    }
+    if !sqlite {
+        dependencies.insert(
+            "@supabase/supabase-js".to_string(),
+            serde_json::Value::String("^2.43.0".to_string()),
+        );
+    }
     let pkg = serde_json::json!({
         "name": name, "version": "0.1.0", "private": true,
         "scripts": { "dev": "next dev", "build": "next build", "start": "next start", "lint": "next lint", "typecheck": "tsc --noEmit", "test": "node --test tests", "postinstall": "prisma generate" },
-        "dependencies": { "next": "^14.2.0", "react": "^18.3.0", "react-dom": "^18.3.0", "@prisma/client": "^5.15.0", "@supabase/supabase-js": "^2.43.0", "zod": "^3.23.0" },
+        "dependencies": dependencies,
         "devDependencies": { "typescript": "^5.5.0", "@types/node": "^20.14.0", "@types/react": "^18.3.0", "@types/react-dom": "^18.3.0", "prisma": "^5.15.0", "tailwindcss": "^3.4.0", "postcss": "^8.4.0", "autoprefixer": "^10.4.0" }
     });
     w(base, "package.json", &serde_json::to_string_pretty(&pkg).unwrap(), r)?;
@@ -80,27 +97,39 @@ fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut Scaffol
     w(base, "tailwind.config.ts", "import type { Config } from 'tailwindcss';\nconst config: Config = { content: ['./app/**/*.{js,ts,jsx,tsx,mdx}'], theme: { extend: {} }, plugins: [] };\nexport default config;\n", r)?;
     w(base, "postcss.config.js", "module.exports = { plugins: { tailwindcss: {}, autoprefixer: {} } };\n", r)?;
 
-    let prov = if stack.id.contains("supabase") { "postgresql" } else { "postgresql" };
+    let (prov, url_value) = if sqlite {
+        ("sqlite", "\"file:./dev.db\"".to_string())
+    } else {
+        ("postgresql", "env(\"DATABASE_URL\")".to_string())
+    };
     // A model is required: `prisma generate` exits 1 on a model-less schema
     // ("You don't have any models defined"), which broke `npm install`
     // (postinstall) and therefore the whole build for every scaffolded app.
-    w(base, "prisma/schema.prisma", &format!("generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider = \"{prov}\"\n  url      = env(\"DATABASE_URL\")\n}}\n\nmodel User {{\n  id        String   @id @default(cuid())\n  email     String   @unique\n  name      String?\n  createdAt DateTime @default(now())\n}}\n"), r)?;
+    w(base, "prisma/schema.prisma", &format!("generator client {{\n  provider = \"prisma-client-js\"\n}}\n\ndatasource db {{\n  provider = \"{prov}\"\n  url      = {url_value}\n}}\n\nmodel User {{\n  id        String   @id @default(cuid())\n  email     String   @unique\n  name      String?\n  createdAt DateTime @default(now())\n}}\n"), r)?;
 
     w(base, "app/layout.tsx", &format!("import type {{ Metadata }} from 'next';\nimport './globals.css';\nexport const metadata: Metadata = {{ title: '{name}' }};\nexport default function RootLayout({{ children }}: {{ children: React.ReactNode }}) {{\n  return (<html lang=\"en\"><body>{{children}}</body></html>);\n}}\n"), r)?;
     w(base, "app/globals.css", "@tailwind base;\n@tailwind components;\n@tailwind utilities;\n", r)?;
     w(base, "app/page.tsx", &format!("export default function Home() {{\n  return (<main className=\"flex min-h-screen items-center justify-center\"><h1 className=\"text-4xl font-bold\">Welcome to {name}</h1></main>);\n}}\n"), r)?;
     w(base, "app/api/health/route.ts", "import { NextResponse } from 'next/server';\nexport async function GET() {\n  return NextResponse.json({ status: 'ok', timestamp: new Date().toISOString() });\n}\n", r)?;
     w(base, "lib/prisma.ts", "import { PrismaClient } from '@prisma/client';\nconst g = globalThis as unknown as { prisma: PrismaClient };\nexport const prisma = g.prisma || new PrismaClient();\nif (process.env.NODE_ENV !== 'production') g.prisma = prisma;\n", r)?;
-    w(base, "lib/supabase.ts", "import { createClient } from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
+    if !sqlite {
+        w(base, "lib/supabase.ts", "import { createClient } from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
+    }
     let local_url = crate::database::local_database_url(&crate::database::local_db_password());
-    w(base, ".env.example", &format!("# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database — local Docker Postgres by default (`docker compose up -d db`).\n# For hosted Postgres later (Supabase cloud, Neon, RDS), replace with its URL:\n# DATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\nDATABASE_URL=\"{local_url}\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n"), r)?;
-    w(
+    if sqlite {
+        w(base, ".env.example", "# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database — SQLite file, zero setup (`npx prisma db push` creates it).\n# Migrate to Postgres later: change provider/url in prisma/schema.prisma and set DATABASE_URL.\nDATABASE_URL=\"file:./dev.db\"\n", r)?;
+    } else {
+        w(base, ".env.example", &format!("# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database — local Docker Postgres by default (`docker compose up -d db`).\n# For hosted Postgres later (Supabase cloud, Neon, RDS), replace with its URL:\n# DATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\nDATABASE_URL=\"{local_url}\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n"), r)?;
+    }
+    if !sqlite {
+        w(
         base,
         "docker-compose.yml",
         &crate::database::render_compose_yml(&crate::database::local_db_password()),
         r,
     )?;
-    w(base, ".gitignore", "node_modules/\n.next/\ndist/\n.env\n.env.local\n*.db\n", r)?;
+    }
+    w(base, ".gitignore", "node_modules/\n.next/\ndist/\n.env\n.env.local\n*.db\n.worktrees/\n", r)?;
     w(
         base,
         "tests/scaffold.test.mjs",
@@ -121,7 +150,7 @@ fn scaffold_express_react(base: &Path, name: &str, r: &mut ScaffoldReport) -> Re
         "devDependencies": { "typescript": "^5.5.0", "vite": "^5.3.0", "@vitejs/plugin-react": "^4.3.0", "tsx": "^4.15.0", "prisma": "^5.15.0", "@types/express": "^4.17.0", "@types/cors": "^2.8.0" }
     });
     w(base, "package.json", &serde_json::to_string_pretty(&pkg).unwrap(), r)?;
-    w(base, ".gitignore", "node_modules/\ndist/\n.env\n", r)?;
+    w(base, ".gitignore", "node_modules/\ndist/\n.env\n.worktrees/\n", r)?;
     let local_url = crate::database::local_database_url(&crate::database::local_db_password());
     w(base, ".env.example", &format!("DATABASE_URL=\"{local_url}\"\nPORT=3000\n# Hosted Postgres later: replace DATABASE_URL with the cloud URL.\n"), r)?;
     Ok(())
@@ -199,6 +228,29 @@ mod tests {
             "local-first DATABASE_URL, got:\n{env_example}"
         );
         assert!(env_example.contains("# DATABASE_URL=\"postgresql://postgres:[PASSWORD]"), "cloud template kept as a comment");
+    }
+
+    #[test]
+    fn test_sqlite_scaffold_needs_neither_docker_nor_cloud() {
+        let (_d, p) = tp();
+        let report = scaffold_project("nextjs-sqlite-vercel", &p, "na").unwrap();
+
+        let schema =
+            std::fs::read_to_string(Path::new(&p).join("prisma/schema.prisma")).unwrap();
+        assert!(schema.contains("provider = \"sqlite\""), "sqlite provider");
+        assert!(schema.contains("file:./dev.db"), "file URL");
+        assert!(schema.contains("model "), "generate still needs a model");
+
+        let pkg = std::fs::read_to_string(Path::new(&p).join("package.json")).unwrap();
+        assert!(!pkg.contains("@supabase/supabase-js"), "no cloud client in a sqlite app");
+        assert!(pkg.contains("@prisma/client"), "prisma stays for schema management");
+
+        assert!(!Path::new(&p).join("lib/supabase.ts").exists());
+        assert!(!Path::new(&p).join("docker-compose.yml").exists(), "no container to define");
+
+        let env_example =
+            std::fs::read_to_string(Path::new(&p).join(".env.example")).unwrap();
+        assert!(env_example.contains("DATABASE_URL=\"file:./dev.db\""), "file URL default");
     }
 
     #[test]

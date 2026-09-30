@@ -85,6 +85,19 @@ pub static STACK_REGISTRY: LazyLock<Vec<StackPreset>> = LazyLock::new(|| vec![
         api_dir: "app/api".into(),
         is_default: false,
     },
+    StackPreset {
+        id: "nextjs-sqlite-vercel".into(),
+        name: "Next.js + SQLite + Vercel".into(),
+        description: "Next.js with Prisma over a local SQLite file. Zero-dependency local development: no Docker, no cloud account. Migrate to Postgres later by changing the Prisma provider and DATABASE_URL.".into(),
+        frameworks: vec!["next.js".into()],
+        database: "sqlite".into(),
+        deploy_target: "vercel".into(),
+        required_cli: vec!["node".into(), "npm".into(), "vercel".into()],
+        required_mcp: vec![],
+        frontend_dir: "app".into(),
+        api_dir: "app/api".into(),
+        is_default: false,
+    },
 ]);
 
 impl StackPreset {
@@ -281,11 +294,11 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_has_four_stacks() {
+    fn test_registry_has_five_stacks() {
         assert_eq!(
             StackPreset::all().len(),
-            4,
-            "registry should define exactly 4 stacks"
+            5,
+            "registry should define exactly 5 stacks"
         );
     }
 
