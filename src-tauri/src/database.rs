@@ -236,13 +236,43 @@ pub fn missing_tables(stdout: &str, models: &[String], provider: &str) -> Vec<St
 // ---------------------------------------------------------------------------
 
 fn docker(args: &[&str]) -> Result<(bool, String), String> {
-    let output = std::process::Command::new("docker")
+    docker_with_timeout(args, 60)
+}
+
+/// Every Docker invocation gets a wall-clock timeout: without one a stalled
+/// daemon (or a slow image pull) wedges the caller forever — observed as a
+/// 30-minute hang in the live container test.
+fn docker_with_timeout(args: &[&str], secs: u64) -> Result<(bool, String), String> {
+    let log_path =
+        std::env::temp_dir().join(format!("sourceforge-docker-{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+    let log_err = log.try_clone().map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new("docker")
         .args(args)
-        .output()
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log))
+        .stderr(std::process::Stdio::from(log_err))
+        .spawn()
         .map_err(|e| format!("cannot start docker: {e}"))?;
-    let mut text = String::from_utf8_lossy(&output.stdout).to_string();
-    text.push_str(&String::from_utf8_lossy(&output.stderr));
-    Ok((output.status.success(), text.trim().to_string()))
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let text = std::fs::read_to_string(&log_path).unwrap_or_default();
+                return Ok((status.success(), text.trim().to_string()));
+            }
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!("docker {} timed out after {secs}s", args.join(" ")));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(500));
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
 }
 
 fn daemon_up() -> bool {
@@ -403,8 +433,11 @@ pub fn ensure_local_postgres(
     let compose = compose_file.to_string_lossy().to_string();
     let slug = compose_slug(project_path);
 
-    let (ok, out) = docker(&["compose", "-f", &compose, "-p", &slug, "up", "-d", "db"])
-        .map_err(ProvisionError::Failed)?;
+    let (ok, out) = docker_with_timeout(
+        &["compose", "-f", &compose, "-p", &slug, "up", "-d", "db"],
+        600,
+    )
+    .map_err(ProvisionError::Failed)?;
     if !ok {
         if docker_daemon_down(&out) {
             return Err(ProvisionError::DaemonDown(out));
