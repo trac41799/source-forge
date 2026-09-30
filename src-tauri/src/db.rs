@@ -40,6 +40,7 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         ("015", include_str!("../migrations/015_user_preferences.sql")),
         ("016", include_str!("../migrations/016_decision_usage.sql")),
         ("017", include_str!("../migrations/017_build_runs.sql")),
+        ("018", include_str!("../migrations/018_database_targets.sql")),
         ("019", include_str!("../migrations/019_decision_reviews_unique.sql")),
         ("020", include_str!("../migrations/020_decision_usage_hash.sql")),
     ];

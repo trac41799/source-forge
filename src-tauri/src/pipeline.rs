@@ -662,20 +662,41 @@ fn stage_provision(
         .unwrap_or_else(stack_registry::detect_installed_clis);
     let mut missing = stack_registry::missing_clis_for_stack(&stack_id, &status);
 
-    // Supabase MCP decision (§6.2): delegate when a Supabase config exists,
-    // otherwise pause the run for the user.
+    // Supabase MCP decision (§6.2): a cloud config wins; otherwise fall back to
+    // a containerized Postgres on this machine (local-first database target).
+    // Only a dead Docker daemon pauses the run — everything else is automatic.
     let stack = stack_registry::StackPreset::get_by_id(&stack_id)
         .ok_or_else(|| format!("Unknown stack '{stack_id}'"))?;
     let mut missing_mcp: Vec<String> = Vec::new();
+    let mut local_db_note: Option<String> = None;
     if stack.required_mcp.iter().any(|m| m == "supabase") {
         let conn = lock(db)?;
         if !has_supabase_config(&conn, &state.project_id) {
-            missing_mcp.push("supabase-mcp".to_string());
+            match crate::database::ensure_local_postgres(
+                &conn,
+                &state.project_id,
+                &opts.project_path,
+            ) {
+                Ok(target) => {
+                    local_db_note = Some(format!(
+                        "local postgres up ({})",
+                        target.container_name.as_deref().unwrap_or("db")
+                    ));
+                }
+                Err(crate::database::ProvisionError::DaemonDown(_)) => {
+                    missing_mcp.push("supabase-mcp".to_string());
+                }
+                Err(crate::database::ProvisionError::Failed(error)) => return Err(error),
+            }
         }
     }
 
     if missing.is_empty() && missing_mcp.is_empty() {
-        return Ok(StageResult::Done("all CLIs + MCPs available".to_string()));
+        let mut message = "all CLIs + MCPs available".to_string();
+        if let Some(note) = local_db_note {
+            message = format!("{message}; {note}");
+        }
+        return Ok(StageResult::Done(message));
     }
 
     let mut delegation = crate::delegation::DelegationReport::new();
@@ -689,7 +710,7 @@ fn stage_provision(
     if !missing_mcp.is_empty() {
         delegation.add_task(
             "provision-supabase",
-            "Connect Supabase MCP (Integrations → Supabase) so migrations can be applied",
+            "Connect Supabase MCP (Integrations → Supabase), or start Docker Desktop so the local Postgres can be provisioned instead",
             "Stack requires a Supabase database",
         );
     }
@@ -924,6 +945,12 @@ fn stage_finalize_and_verify(
         adapters
             .event_sink
             .emit("finalize_and_verify", "progress", &detail);
+        // Apply the Prisma schema against the provisioned database (local
+        // container or cloud) so the app and its checks run against a real schema.
+        let schema_detail = crate::database::apply_prisma_schema(&project_path)?;
+        adapters
+            .event_sink
+            .emit("finalize_and_verify", "progress", &schema_detail);
     }
 
     let verification = if adapters.install_deps {
@@ -1069,7 +1096,7 @@ fn install_project_dependencies(project_path: &str) -> Result<String, String> {
 
 /// Run a command with a wall-clock timeout, sending its output to a temp log so
 /// a chatty child cannot deadlock on a full pipe. Failures carry the log tail.
-fn run_with_timeout(mut cmd: std::process::Command, secs: u64) -> Result<(), String> {
+pub(crate) fn run_with_timeout(mut cmd: std::process::Command, secs: u64) -> Result<(), String> {
     let log_path =
         std::env::temp_dir().join(format!("sourceforge-cmd-{}.log", std::process::id()));
     let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
@@ -1107,7 +1134,7 @@ fn run_with_timeout(mut cmd: std::process::Command, secs: u64) -> Result<(), Str
     }
 }
 
-fn tail_of(path: &Path) -> String {
+pub(crate) fn tail_of(path: &Path) -> String {
     let Ok(text) = std::fs::read_to_string(path) else {
         return String::new();
     };
