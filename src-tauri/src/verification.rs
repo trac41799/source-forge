@@ -924,6 +924,26 @@ fn server_log_tail() -> String {
     lines.into_iter().rev().collect::<Vec<_>>().join(" | ")
 }
 
+/// Resolve the `next` entry that Node can actually execute.
+///
+/// `node_modules/.bin/next` is a POSIX shell script, which on Windows makes
+/// Node die with `SyntaxError: missing ) after argument list` on its second
+/// line (`basedir=$(dirname ...)`). The real JS entry works on every platform,
+/// so it is preferred; the `.bin` shim is only a fallback.
+fn resolve_next_bin(base: &Path) -> std::path::PathBuf {
+    let dist = base
+        .join("node_modules")
+        .join("next")
+        .join("dist")
+        .join("bin")
+        .join("next");
+    if dist.exists() {
+        dist
+    } else {
+        base.join("node_modules").join(".bin").join("next")
+    }
+}
+
 fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
     let is_nextjs = base.join("next.config.ts").exists() || base.join("next.config.js").exists();
     let is_express = base.join("src").join("server.ts").exists();
@@ -952,8 +972,7 @@ fn check_e2e_runtime(base: &Path, report: &mut VerificationReport) {
     let mut child: Option<Child> = None;
 
     if is_nextjs {
-        let nm = base.join("node_modules").join(".bin").join("next");
-        let next_bin = if nm.exists() { nm } else { base.join("node_modules").join("next").join("dist").join("bin").join("next") };
+        let next_bin = resolve_next_bin(base);
         if !next_bin.exists() {
             report.add(BuildCheck {
                 name: "E2E runtime test".into(),
@@ -1543,5 +1562,25 @@ mod tests {
             "failure should explain why: {:?}",
             build.status
         );
+    }
+
+    #[test]
+    fn test_resolve_next_bin_prefers_the_real_js_entry() {
+        // `node_modules/.bin/next` is a POSIX shell script, which Node cannot
+        // execute on Windows (SyntaxError on `basedir=$(...)`). The resolver
+        // must prefer the real JS entry whenever it exists.
+        let dir = TempDir::new().unwrap();
+        let base = dir.path();
+        let dist = base.join("node_modules").join("next").join("dist").join("bin");
+        let shim = base.join("node_modules").join(".bin");
+        std::fs::create_dir_all(&dist).unwrap();
+        std::fs::create_dir_all(&shim).unwrap();
+        std::fs::write(dist.join("next"), "console.log('next');").unwrap();
+        std::fs::write(shim.join("next"), "#!/bin/sh\nbasedir=$(dirname x)\n").unwrap();
+
+        assert_eq!(resolve_next_bin(base), dist.join("next"));
+
+        std::fs::remove_file(dist.join("next")).unwrap();
+        assert_eq!(resolve_next_bin(base), shim.join("next"));
     }
 }
