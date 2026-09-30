@@ -49,6 +49,7 @@ mod preferences;
 mod provisioner;
 mod arch_engine;
 mod delegation;
+mod database;
 mod decision;
 
 use commands::AppState;

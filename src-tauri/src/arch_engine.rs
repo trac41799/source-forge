@@ -92,7 +92,14 @@ fn scaffold_nextjs(base: &Path, name: &str, stack: &StackPreset, r: &mut Scaffol
     w(base, "app/api/health/route.ts", "import { NextResponse } from 'next/server';\nexport async function GET() {\n  return NextResponse.json({ status: 'ok', timestamp: new Date().toISOString() });\n}\n", r)?;
     w(base, "lib/prisma.ts", "import { PrismaClient } from '@prisma/client';\nconst g = globalThis as unknown as { prisma: PrismaClient };\nexport const prisma = g.prisma || new PrismaClient();\nif (process.env.NODE_ENV !== 'production') g.prisma = prisma;\n", r)?;
     w(base, "lib/supabase.ts", "import { createClient } from '@supabase/supabase-js';\nexport const supabase = createClient(process.env.NEXT_PUBLIC_SUPABASE_URL!, process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!);\n", r)?;
-    w(base, ".env.example", "# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database\nDATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n", r)?;
+    let local_url = crate::database::local_database_url(&crate::database::local_db_password());
+    w(base, ".env.example", &format!("# App\nJWT_SECRET=\"change-me\"\nPORT=3000\nCLIENT_URL=\"http://localhost:3000\"\n# Database — local Docker Postgres by default (`docker compose up -d db`).\n# For hosted Postgres later (Supabase cloud, Neon, RDS), replace with its URL:\n# DATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\nDATABASE_URL=\"{local_url}\"\n# Supabase\nNEXT_PUBLIC_SUPABASE_URL=\"https://[REF].supabase.co\"\nNEXT_PUBLIC_SUPABASE_ANON_KEY=\"your-anon-key\"\n"), r)?;
+    w(
+        base,
+        "docker-compose.yml",
+        &crate::database::render_compose_yml(&crate::database::local_db_password()),
+        r,
+    )?;
     w(base, ".gitignore", "node_modules/\n.next/\ndist/\n.env\n.env.local\n*.db\n", r)?;
     w(
         base,
@@ -115,7 +122,8 @@ fn scaffold_express_react(base: &Path, name: &str, r: &mut ScaffoldReport) -> Re
     });
     w(base, "package.json", &serde_json::to_string_pretty(&pkg).unwrap(), r)?;
     w(base, ".gitignore", "node_modules/\ndist/\n.env\n", r)?;
-    w(base, ".env.example", "DATABASE_URL=\"postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres\"\nPORT=3000\n", r)?;
+    let local_url = crate::database::local_database_url(&crate::database::local_db_password());
+    w(base, ".env.example", &format!("DATABASE_URL=\"{local_url}\"\nPORT=3000\n# Hosted Postgres later: replace DATABASE_URL with the cloud URL.\n"), r)?;
     Ok(())
 }
 
@@ -178,6 +186,19 @@ mod tests {
         for script in ["typecheck", "test", "postinstall"] {
             assert!(pkg.contains(&format!("\"{script}\"")), "package.json must define {script}");
         }
+
+        // Local-first database: the scaffold ships a compose file for a pinned
+        // Postgres and points DATABASE_URL at it (cloud stays a comment).
+        let compose = std::fs::read_to_string(Path::new(&p).join("docker-compose.yml")).unwrap();
+        assert!(compose.contains("postgres:16-alpine"), "pinned image");
+        assert!(compose.contains("54322:5432"), "host port");
+        assert!(compose.contains("pg_isready"), "healthcheck");
+        let env_example = std::fs::read_to_string(Path::new(&p).join(".env.example")).unwrap();
+        assert!(
+            env_example.contains("DATABASE_URL=\"postgresql://postgres:postgres@localhost:54322/postgres\""),
+            "local-first DATABASE_URL, got:\n{env_example}"
+        );
+        assert!(env_example.contains("# DATABASE_URL=\"postgresql://postgres:[PASSWORD]"), "cloud template kept as a comment");
     }
 
     #[test]

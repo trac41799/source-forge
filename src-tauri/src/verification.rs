@@ -284,10 +284,36 @@ fn verify_project_lenient(base: &Path) -> VerificationReport {
     // ── 5. E2E runtime verification ─────────────────────────────
     check_e2e_runtime(base, &mut report);
 
+    // ── 6. Database (local container or cloud) ─────────────────────
+    check_database(base, &mut report);
+
     report
 }
 
 // ── Individual Checks ──────────────────────────────────────────────────
+
+/// The database behind the app's DATABASE_URL: reachable, and carrying the
+/// tables the Prisma schema declares. Skipped when the project has no Prisma
+/// schema (nothing to check against).
+fn check_database(base: &Path, report: &mut VerificationReport) {
+    match crate::database::check_database(&base.to_string_lossy()) {
+        Ok(None) => report.add(BuildCheck {
+            name: "database reachable + schema applied".into(),
+            status: CheckStatus::Skip("no prisma schema — no database to verify".into()),
+            detail: String::new(),
+        }),
+        Ok(Some(detail)) => report.add(BuildCheck {
+            name: "database reachable + schema applied".into(),
+            status: CheckStatus::Pass,
+            detail,
+        }),
+        Err(error) => report.add(BuildCheck {
+            name: "database reachable + schema applied".into(),
+            status: CheckStatus::Fail(error),
+            detail: String::new(),
+        }),
+    }
+}
 
 fn check_package_json(base: &Path, report: &mut VerificationReport) {
     if base.join("package.json").exists() {
@@ -510,7 +536,7 @@ fn check_index_html(base: &Path, report: &mut VerificationReport) {
 /// execute: they must go through `cmd /C` (the same fix the agent adapter
 /// needed). Without this every build/typecheck check reported
 /// "program not found" and could never actually run.
-fn npm_command(program: &str) -> std::process::Command {
+pub(crate) fn npm_command(program: &str) -> std::process::Command {
     if cfg!(windows) {
         let mut cmd = std::process::Command::new("cmd");
         cmd.arg("/C").arg(program);
