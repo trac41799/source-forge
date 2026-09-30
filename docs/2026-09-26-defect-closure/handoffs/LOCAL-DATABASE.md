@@ -44,6 +44,18 @@ schema are the portable artifacts.
   boots a real container, runs a `psql` roundtrip, and tears it down — it runs
   automatically once Docker is up.
 
+## Verified (SQLite ladder, 2026-09-30)
+
+- New `nextjs-sqlite-vercel` preset: file database, no daemon, no cloud account.
+- From-empty POC with that stack is **green**: provision records the sqlite
+  target, scaffold (now committed, so agents see the app), agent delivers,
+  `prisma db push` creates `dev.db`, and verification passes including
+  `database reachable + schema applied` (per-model `COUNT` probes, since
+  `db execute` prints no rows on SQLite) and the E2E runtime check.
+- Delivery hardening from the same runs: `HANDOFF_*.md` excluded from delivery
+  commits; scaffold output committed so worktrees contain the app; a post-merge
+  guard turns silently-lost files into a loud conflict.
+
 ## Not yet verified (needs Docker Desktop running)
 
 ```powershell

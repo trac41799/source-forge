@@ -669,7 +669,21 @@ fn stage_provision(
         .ok_or_else(|| format!("Unknown stack '{stack_id}'"))?;
     let mut missing_mcp: Vec<String> = Vec::new();
     let mut local_db_note: Option<String> = None;
-    if stack.required_mcp.iter().any(|m| m == "supabase") {
+    if stack.database == "sqlite" {
+        // File database: no daemon, no cloud account, nothing to boot.
+        let conn = lock(db)?;
+        match crate::database::ensure_sqlite_target(
+            &conn,
+            &state.project_id,
+            "file:./dev.db",
+            &opts.project_path,
+        ) {
+            Ok(_) => {
+                local_db_note = Some("sqlite target ready (file:./dev.db)".to_string());
+            }
+            Err(error) => return Err(error),
+        }
+    } else if stack.required_mcp.iter().any(|m| m == "supabase") {
         let conn = lock(db)?;
         if !has_supabase_config(&conn, &state.project_id) {
             match crate::database::ensure_local_postgres(
@@ -751,8 +765,16 @@ fn stage_scaffold(opts: &PipelineOptions, state: &mut PipelineState) -> Result<S
         .unwrap_or_else(|| "app".to_string());
 
     let report = crate::arch_engine::scaffold_project(&stack_id, &opts.project_path, &project_name)?;
+    // Commit what the scaffold wrote: agent worktrees branch from the base
+    // branch later, and uncommitted scaffold output would be invisible to every
+    // agent. A commit failure fails the stage — blind agents help no one.
+    let commit_detail = crate::wave_executor::commit_scaffold_output(
+        &opts.project_path,
+        &stack_id,
+        &report.files_created,
+    )?;
     Ok(StageResult::Done(format!(
-        "scaffolded {} files",
+        "scaffolded {} files; {commit_detail}",
         report.files_created.len()
     )))
 }

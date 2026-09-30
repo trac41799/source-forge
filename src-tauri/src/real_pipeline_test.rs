@@ -451,6 +451,11 @@ fn test_real_poc_from_empty() {
     let spec_dir = tempfile::TempDir::new().unwrap();
     let spec = make_poc_spec(spec_dir.path());
 
+    // ACC_POC_STACK=nextjs-sqlite-vercel runs the same POC against the
+    // zero-dependency SQLite variant (no Docker, no cloud account).
+    let stack = std::env::var("ACC_POC_STACK").unwrap_or_else(|_| STACK.to_string());
+    println!("[poc] stack={stack}");
+
     let db_dir = tempfile::TempDir::new().unwrap();
     let conn: Connection = crate::db::init_db_path(&db_dir.path().join("poc.db")).expect("init db");
     let db = Mutex::new(conn);
@@ -462,7 +467,7 @@ fn test_real_poc_from_empty() {
             None,
             &spec,
             &project.path().to_string_lossy(),
-            Some(STACK),
+            Some(&stack),
         )
         .unwrap()
     };
@@ -472,7 +477,7 @@ fn test_real_poc_from_empty() {
         project_id: None,
         spec_path: spec.clone(),
         project_path: project.path().to_string_lossy().to_string(),
-        stack_id: Some(STACK.to_string()),
+        stack_id: Some(stack.clone()),
         agent_command: "opencode".to_string(),
         base_branch: "main".to_string(),
         allow_deploy_on_failed_verification: false,
