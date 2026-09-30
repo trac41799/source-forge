@@ -58,6 +58,12 @@ schema are the portable artifacts.
 
 ## Not yet verified (needs Docker Desktop running)
 
+**Update 2026-09-30:** the engine is up (27.3.1), but pulling
+`postgres:16-alpine` stalls in this environment (no layers completed after
+9 minutes) — the container path is implemented and guarded (every Docker call
+now has a wall-clock timeout after a 30-minute hang was observed), but the live
+boot still needs a networked machine. The SQLite ladder below needs nothing.
+
 ```powershell
 # 1. wait until this prints a version:
 docker info --format "{{.ServerVersion}}"
