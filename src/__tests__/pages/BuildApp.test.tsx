@@ -3,6 +3,10 @@ import userEvent from "@testing-library/user-event";
 import BuildApp from "@/pages/BuildApp";
 import { mockInvoke } from "../setup";
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (options: unknown = {}) => mockInvoke("plugin:dialog|open", { options }),
+}));
+
 const REPORT = {
   run_id: "run-1",
   status: "succeeded",
@@ -122,6 +126,32 @@ describe("BuildApp page", () => {
     expect(mockInvoke).toHaveBeenCalledWith("build_app_cmd", {
       options: expect.objectContaining({
         agent_command: "pi",
+      }),
+    });
+  });
+
+  it("picks spec file and project folder via native dialog buttons", async () => {
+    mockInvoke.mockImplementation(async (cmd: string, args?: { options?: { directory?: boolean } }) => {
+      if (cmd === "plugin:dialog|open") {
+        return args?.options?.directory ? "D:/projects/demo-app" : "docs/SPEC.md";
+      }
+      return REPORT;
+    });
+
+    render(<BuildApp />);
+
+    await userEvent.click(screen.getByRole("button", { name: /browse spec/i }));
+    expect(await screen.findByDisplayValue("docs/SPEC.md")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /browse folder/i }));
+    expect(await screen.findByDisplayValue("D:/projects/demo-app")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /build app/i }));
+    await screen.findByText("succeeded");
+    expect(mockInvoke).toHaveBeenCalledWith("build_app_cmd", {
+      options: expect.objectContaining({
+        spec_path: "docs/SPEC.md",
+        project_path: "D:/projects/demo-app",
       }),
     });
   });

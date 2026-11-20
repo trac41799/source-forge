@@ -5,8 +5,8 @@ import { IPC } from "@/lib/ipc/commands";
 import { useProjectStore } from "@/stores/projectStore";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { FilePickerInput, FolderPickerInput } from "@/components/ui/path-picker";
 import {
   Hammer,
   PlayCircle,
@@ -200,22 +200,33 @@ export default function BuildApp() {
 
       <Card className="p-4 space-y-3">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Spec file (markdown)</span>
-            <Input
+          <div className="space-y-1 text-sm">
+            <label htmlFor="build-spec-path" className="block text-muted-foreground">
+              Spec file (markdown)
+            </label>
+            <FilePickerInput
+              id="build-spec-path"
               value={specPath}
-              onChange={(e) => setSpecPath(e.target.value)}
+              onChange={setSpecPath}
               placeholder="docs/PLAN.md"
+              title="Select Spec Markdown File"
+              filters={[{ name: "Markdown", extensions: ["md", "markdown", "txt"] }]}
+              browseLabel="Browse Spec..."
             />
-          </label>
-          <label className="space-y-1 text-sm">
-            <span className="text-muted-foreground">Project path</span>
-            <Input
+          </div>
+          <div className="space-y-1 text-sm">
+            <label htmlFor="build-project-path" className="block text-muted-foreground">
+              Project path
+            </label>
+            <FolderPickerInput
+              id="build-project-path"
               value={projectPath}
-              onChange={(e) => setProjectPath(e.target.value)}
+              onChange={setProjectPath}
               placeholder="/path/to/project"
+              title="Select Project Folder"
+              browseLabel="Browse Folder..."
             />
-          </label>
+          </div>
           <label className="space-y-1 text-sm">
             <span className="text-muted-foreground">Stack</span>
             <select

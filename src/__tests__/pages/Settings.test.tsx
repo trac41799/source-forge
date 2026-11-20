@@ -6,6 +6,10 @@ import SettingsPage from "@/pages/Settings";
 import { useSettingsStore } from "@/stores/settingsStore";
 import { mockInvoke } from "../setup";
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (options: unknown = {}) => mockInvoke("plugin:dialog|open", { options }),
+}));
+
 function renderSettings() {
   return render(
     <MemoryRouter>
@@ -152,5 +156,22 @@ describe("SettingsPage", () => {
     await userEvent.click(toggle);
     expect(toggle).toBeChecked();
     expect(useSettingsStore.getState().experimentalFeatures).toBe(true);
+  });
+
+  it("browses for Default Project Path using FolderPickerInput", async () => {
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "plugin:dialog|open") return "D:/projects/default-app";
+      return undefined;
+    });
+
+    renderSettings();
+
+    const input = screen.getByPlaceholderText("/path/to/project");
+    expect(input).toHaveAttribute("id", "project-path");
+
+    const browseBtn = screen.getByRole("button", { name: /browse folder/i });
+    await userEvent.click(browseBtn);
+
+    expect(await screen.findByDisplayValue("D:/projects/default-app")).toBeInTheDocument();
   });
 });

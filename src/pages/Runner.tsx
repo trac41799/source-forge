@@ -1,5 +1,6 @@
 import { useState, useMemo, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
+import { open } from '@tauri-apps/plugin-dialog'
 import { useAgentStore } from '../stores/agentStore'
 import { usePresetStore } from '../stores/presetStore'
 import { useProjectStore } from '../stores/projectStore'
@@ -10,7 +11,7 @@ import AgentGrid from '../components/runner/AgentGrid'
 import { OrchestratorToggle } from '../components/runner/OrchestratorToggle'
 import { AGENT_CONFIGS } from '../lib/agents/configs'
 import type { AgentConfig } from '../lib/types'
-import { AlertTriangle, CheckCircle2, Pause, Play, Wand2, XCircle, Sliders } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, FolderOpen, Pause, Play, Wand2, XCircle, Sliders } from 'lucide-react'
 
 export default function Runner() {
   const navigate = useNavigate()
@@ -113,6 +114,21 @@ export default function Runner() {
   const handleDocs = () => {
     navigate('/knowledge')
   }
+
+  const handleBrowseProject = async () => {
+    try {
+      const selected = await open({
+        directory: true,
+        multiple: false,
+        title: 'Select Project Folder',
+      })
+      if (selected && typeof selected === 'string') {
+        await switchProject(selected)
+      }
+    } catch (e) {
+      console.error('Failed to open project folder dialog:', e)
+    }
+  }
   
   const handlePresetClick = (presetId: string) => {
     const agentIds = Array.from(agents.keys())
@@ -152,6 +168,15 @@ export default function Runner() {
               <option key={path} value={path}>{path}</option>
             ))}
           </select>
+          <button
+            type="button"
+            onClick={() => void handleBrowseProject()}
+            className="px-2.5 py-1.5 text-xs text-foreground bg-glass-20 border border-glass-border rounded-lg glass-hover flex items-center gap-1.5"
+            title="Browse for a project folder"
+          >
+            <FolderOpen className="size-3.5" />
+            Browse Folder...
+          </button>
         </div>
         <div className="flex items-center gap-2">
           <button
