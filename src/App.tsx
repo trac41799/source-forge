@@ -4,6 +4,8 @@ import { ThemeProvider } from "@/components/ThemeProvider";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { RecoveryBanner } from "@/components/RecoveryBanner";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { OnboardingWizard } from "@/components/onboarding/OnboardingWizard";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { PlaceholderPage } from "@/pages/placeholder";
 import Runner from "@/pages/Runner";
 import Integrations from "@/pages/Integrations";
@@ -25,6 +27,13 @@ function App() {
   const location = useLocation();
   const hasCheckedRef = useRef(false);
   const [recoverySnapshot, setRecoverySnapshot] = useState<AppStateSnapshot | null>(null);
+  const loadSettings = useSettingsStore((s) => s.loadSettings);
+  const forceShowOnboarding = useSettingsStore((s) => s.forceShowOnboarding);
+  const dismissOnboarding = useSettingsStore((s) => s.dismissOnboarding);
+
+  useEffect(() => {
+    loadSettings();
+  }, [loadSettings]);
 
   useEffect(() => {
     if (hasCheckedRef.current) return;
@@ -68,6 +77,9 @@ function App() {
               snapshot={recoverySnapshot}
               onDismiss={() => setRecoverySnapshot(null)}
             />
+          )}
+          {forceShowOnboarding && (
+            <OnboardingWizard onComplete={() => dismissOnboarding()} />
           )}
           <main className="flex-1 overflow-auto">
             <ErrorBoundary key={location.pathname}>

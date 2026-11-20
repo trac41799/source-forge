@@ -209,7 +209,7 @@ export default function Runner() {
                 + Add Agent
               </button>
               {showAgentDropdown && (
-                <div className="absolute right-0 top-full mt-1 w-48 glass-card shadow-lg z-10 p-1 max-h-72 overflow-y-auto">
+                <div className="absolute right-0 top-full mt-1 w-52 glass-card shadow-lg z-10 p-1 max-h-96 overflow-y-auto">
                   {AGENT_CONFIGS.map((agent) => (
                     <button
                       key={agent.id}

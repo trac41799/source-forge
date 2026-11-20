@@ -1203,37 +1203,34 @@ function KgExplorerPanel({
 
   const toggleTrigram = (tag: string) => {
     const cy = cyRef.current as any;
-    if (!cy) return;
     const newHidden = new Set(hiddenTrigrams);
     if (newHidden.has(tag)) {
       newHidden.delete(tag);
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "element");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "element");
     } else {
       newHidden.add(tag);
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "none");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "none");
     }
     setHiddenTrigrams(newHidden);
   };
 
   const showAllEdges = () => {
     const cy = cyRef.current as any;
-    if (!cy) return;
-    cy.edges().style("display", "element");
+    cy?.edges().style("display", "element");
     setHiddenTrigrams(new Set());
   };
 
   const hideAllTrigramEdges = () => {
     const cy = cyRef.current as any;
-    if (!cy) return;
     const trigrams = Object.keys(BAGUA_COLORS);
     trigrams.forEach((tag) => {
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "none");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "none");
     });
     setHiddenTrigrams(new Set(trigrams));
   };
 
-  const nodeCount = store.kgSubgraph?.nodes.length ?? 0;
-  const edgeCount = store.kgSubgraph?.edges.length ?? 0;
+  const nodeCount = store.kgSubgraph?.nodes?.length ?? 0;
+  const edgeCount = store.kgSubgraph?.edges?.length ?? 0;
 
   return (
     <div className="flex flex-col gap-4 flex-1 min-h-0">
@@ -1268,6 +1265,17 @@ function KgExplorerPanel({
             <Button size="sm" variant="outline" onClick={handleLoadFromItems}>
               <Layers className="w-3.5 h-3.5 mr-1" /> Load Top 20
             </Button>
+            {experimentalFeatures && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  store.kgRunCommunityDetection();
+                }}
+              >
+                <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
+              </Button>
+            )}
             {nodeCount > 0 && (
               <span className="text-xs text-muted-foreground">
                 {nodeCount} nodes · {edgeCount} edges
@@ -1275,7 +1283,7 @@ function KgExplorerPanel({
             )}
           </div>
 
-          {experimentalFeatures && nodeCount > 0 && (
+          {experimentalFeatures && (
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[10px] text-muted-foreground mr-1">Trigram filter:</span>
               {Object.entries(BAGUA_COLORS).map(([tag, color]) => {
@@ -1355,7 +1363,7 @@ function KgExplorerPanel({
             </div>
           )}
 
-          {experimentalFeatures && nodeCount > 0 && (
+          {experimentalFeatures && (
             <Card className="p-0 overflow-hidden border-white/10">
               <button
                 onClick={() => setLegendOpen(!legendOpen)}
@@ -1583,7 +1591,7 @@ interface CytoscapeElement {
 }
 
 function buildKgElements(subgraph: SubgraphResult | null): CytoscapeElement[] {
-  if (!subgraph) return [];
+  if (!subgraph || !Array.isArray(subgraph.nodes) || !Array.isArray(subgraph.edges)) return [];
   const typeColors: Record<string, string> = {
     decision: "#60a5fa",
     pattern: "#34d399",
