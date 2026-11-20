@@ -1,5 +1,10 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useOrchestrationStore, type TaskSuggestion } from "@/stores/orchestrationStore";
+import { useProjectStore } from "@/stores/projectStore";
+import { useAgentStore } from "@/stores/agentStore";
+import { getAgentConfig } from "@/lib/agents/configs";
+import type { AgentConfig } from "@/lib/types";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,17 +14,51 @@ import { cn } from "@/lib/utils";
 import { Send, TrendingUp, BarChart3, CheckCircle2 } from "lucide-react";
 
 export default function RoutePage() {
+  const navigate = useNavigate();
   const { suggestions, routeTask } = useOrchestrationStore();
+  const { currentProject, recentProjects } = useProjectStore();
+  const spawnAgent = useAgentStore((s) => s.spawnAgent);
   const [taskDesc, setTaskDesc] = useState("");
   const [taskType, setTaskType] = useState("implement");
   const [projectId, setProjectId] = useState("");
   const [loading, setLoading] = useState(false);
+  const [sendingAgentId, setSendingAgentId] = useState<string | null>(null);
+  const [sendError, setSendError] = useState<string | null>(null);
 
   const handleRoute = async () => {
     if (!taskDesc.trim()) return;
     setLoading(true);
     await routeTask(taskDesc, taskType, projectId || undefined);
     setLoading(false);
+  };
+
+  const handleSendToAgent = async (agentId: string) => {
+    setSendingAgentId(agentId);
+    setSendError(null);
+    try {
+      const existingAgents = useAgentStore.getState().agents;
+      if (!existingAgents.has(agentId)) {
+        const config: AgentConfig = getAgentConfig(agentId) ?? {
+          id: agentId,
+          label: agentId === "pi" ? "Pi Agent (ACP)" : agentId,
+          spawnCmd: agentId,
+          defaultArgs: [],
+          memoryFile: "AGENTS.md",
+          globalConfigPath: `~/.${agentId}/`,
+          mcpConfigFile: "config.json",
+          mcpConfigKey: "mcpServers",
+          tier: 1,
+          waveEligible: true,
+          supportsSubagents: false,
+        };
+        await spawnAgent(config, currentProject?.path || ".");
+      }
+      navigate("/runner");
+    } catch (err) {
+      setSendError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSendingAgentId(null);
+    }
   };
 
   return (
@@ -60,13 +99,28 @@ export default function RoutePage() {
             </select>
           </div>
           <div className="flex-1">
-            <label className="block text-xs text-gray-400 mb-1.5">Project ID (optional)</label>
-            <Input
+            <label htmlFor="route-project-scope" className="block text-xs text-gray-400 mb-1.5">Project Scope</label>
+            <select
+              id="route-project-scope"
+              aria-label="Project Scope"
               value={projectId}
               onChange={(e) => setProjectId(e.target.value)}
-              placeholder="Leave empty for cross-project routing"
-              className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-            />
+              className="w-full h-9 px-2 py-1.5 text-sm bg-[#0d1117] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+            >
+              <option value="">All Projects (Cross-project routing)</option>
+              {currentProject && (
+                <option value={currentProject.id || currentProject.path}>
+                  Active: {currentProject.name || currentProject.id} ({currentProject.path})
+                </option>
+              )}
+              {recentProjects
+                .filter((p) => p !== currentProject?.path && p !== currentProject?.id)
+                .map((p) => (
+                  <option key={p} value={p}>
+                    {p}
+                  </option>
+                ))}
+            </select>
           </div>
           <div className="flex items-end">
             <Button onClick={handleRoute} disabled={loading || !taskDesc.trim()} className="gap-2">
@@ -81,6 +135,12 @@ export default function RoutePage() {
         </div>
       </Card>
 
+      {sendError && (
+        <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+          {sendError}
+        </div>
+      )}
+
       {suggestions.length > 0 && (
         <div>
           <div className="flex items-center gap-2 mb-3">
@@ -92,7 +152,13 @@ export default function RoutePage() {
           <ScrollArea className="flex-1">
             <div className="grid grid-cols-1 gap-3">
               {suggestions.map((s, i) => (
-                <SuggestionCard key={`${s.agent_id}-${i}`} suggestion={s} rank={i + 1} />
+                <SuggestionCard
+                  key={`${s.agent_id}-${i}`}
+                  suggestion={s}
+                  rank={i + 1}
+                  sending={sendingAgentId === s.agent_id}
+                  onSendToAgent={handleSendToAgent}
+                />
               ))}
             </div>
           </ScrollArea>
@@ -110,7 +176,17 @@ export default function RoutePage() {
   );
 }
 
-function SuggestionCard({ suggestion, rank }: { suggestion: TaskSuggestion; rank: number }) {
+function SuggestionCard({
+  suggestion,
+  rank,
+  sending,
+  onSendToAgent,
+}: {
+  suggestion: TaskSuggestion;
+  rank: number;
+  sending: boolean;
+  onSendToAgent: (agentId: string) => void;
+}) {
   const pct = (suggestion.success_rate * 100).toFixed(0);
   const color = suggestion.success_rate >= 0.7 ? "green" : suggestion.success_rate >= 0.4 ? "yellow" : "red";
 
@@ -163,9 +239,14 @@ function SuggestionCard({ suggestion, rank }: { suggestion: TaskSuggestion; rank
               style={{ width: `${Math.max(4, suggestion.success_rate * 100)}%` }}
             />
           </div>
-          <Button size="sm" className="gap-1.5 text-xs">
+          <Button
+            size="sm"
+            className="gap-1.5 text-xs"
+            disabled={sending}
+            onClick={() => onSendToAgent(suggestion.agent_id)}
+          >
             <Send className="size-3" />
-            Send to Agent
+            {sending ? "Sending..." : "Send to Agent"}
           </Button>
         </div>
       </div>

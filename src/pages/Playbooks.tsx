@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { useOrchestrationStore } from "@/stores/orchestrationStore";
+import { open } from "@tauri-apps/plugin-dialog";
+import { useOrchestrationStore, type MemoryCandidate } from "@/stores/orchestrationStore";
+import { useMemoryStore } from "@/stores/memoryStore";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -20,10 +22,57 @@ export default function Playbooks() {
   const [includeMemory, setIncludeMemory] = useState(true);
   const [includePresets, setIncludePresets] = useState(true);
   const [copied, setCopied] = useState(false);
+  const [importedFilePath, setImportedFilePath] = useState<string | null>(null);
+  const [candidateFeedback, setCandidateFeedback] = useState<Record<string, string>>({});
 
   useEffect(() => {
     getMemoryCandidates();
   }, []);
+
+  const handleSelectAccFile = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        filters: [{ name: "ACC Playbook", extensions: ["acc", "json", "zip"] }],
+      });
+      if (typeof selected === "string" && selected) {
+        setImportedFilePath(selected);
+      }
+    } catch (err) {
+      console.error("Failed to select playbook file:", err);
+    }
+  };
+
+  const updateCandidateStatus = (candidateId: string, status: string, feedback: string) => {
+    useOrchestrationStore.setState((state) => ({
+      memoryCandidates: state.memoryCandidates.map((c) =>
+        c.id === candidateId ? { ...c, status } : c
+      ),
+    }));
+    setCandidateFeedback((prev) => ({ ...prev, [candidateId]: feedback }));
+  };
+
+  const handleAddToMemory = async (candidate: MemoryCandidate) => {
+    try {
+      await useMemoryStore.getState().createFact({
+        agent_id: "playbook",
+        session_id: candidate.session_id || "playbook",
+        user_id: "local",
+        org_id: candidate.project_id || "default",
+        fact_type: "learning",
+        content: candidate.content,
+        metadata: candidate.source_pattern ?? undefined,
+        confidence: 0.9,
+      });
+    } catch (err) {
+      console.error("Failed to persist memory fact:", err);
+    }
+    updateCandidateStatus(candidate.id, "approved", "Added to memory");
+  };
+
+  const handleSkipCandidate = (candidate: MemoryCandidate) => {
+    updateCandidateStatus(candidate.id, "skipped", "Skipped");
+  };
 
   const handleExport = async () => {
     await buildPlaybookManifest(
@@ -119,9 +168,15 @@ export default function Playbooks() {
             <div className="border-2 border-dashed border-border rounded-lg p-8 text-center space-y-3">
               <Boxes className="size-8 mx-auto opacity-30" />
               <p className="text-sm text-muted-foreground">Drop a .acc playbook file here</p>
-              <Button variant="outline" size="sm">
+              <Button type="button" variant="outline" size="sm" onClick={handleSelectAccFile}>
                 <FileJson className="size-4 mr-2" /> Select .acc File
               </Button>
+              {importedFilePath && (
+                <div className="mt-2 rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-400 flex items-center justify-center gap-2">
+                  <Check className="size-3.5 shrink-0" />
+                  <span className="truncate">Imported: {importedFilePath}</span>
+                </div>
+              )}
             </div>
           </Card>
         </div>
@@ -156,9 +211,30 @@ export default function Playbooks() {
                         Pattern: <code className="text-xs">{candidate.source_pattern}</code>
                       </p>
                     )}
-                    <div className="flex gap-2">
-                      <Button variant="outline" size="sm">Add to Memory</Button>
-                      <Button variant="ghost" size="sm">Skip</Button>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        disabled={candidate.status === "approved" || candidate.status === "skipped"}
+                        onClick={() => handleAddToMemory(candidate)}
+                      >
+                        Add to Memory
+                      </Button>
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="sm"
+                        disabled={candidate.status === "approved" || candidate.status === "skipped"}
+                        onClick={() => handleSkipCandidate(candidate)}
+                      >
+                        Skip
+                      </Button>
+                      {candidateFeedback[candidate.id] && (
+                        <span className="text-xs text-muted-foreground ml-auto">
+                          {candidateFeedback[candidate.id]}
+                        </span>
+                      )}
                     </div>
                   </Card>
                 ))}
