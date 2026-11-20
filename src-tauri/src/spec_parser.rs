@@ -99,6 +99,302 @@ pub fn parse_gap_closure_plan(markdown: &str) -> Vec<SpecTask> {
     tasks
 }
 
+/// Dual-mode parser: parses structured `## Phase N` / `### Step X.Y` plans first,
+/// and falls back to decomposing freeform markdown headings, bullet/numbered lists,
+/// or plain paragraphs into runnable `SpecTask` items with wave & dependency edges.
+pub fn parse_spec_or_prompt(content: &str) -> Vec<SpecTask> {
+    let structured = parse_gap_closure_plan(content);
+    if !structured.is_empty() {
+        return structured;
+    }
+
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+
+    let raw_items = extract_freeform_items(trimmed);
+    let mut tasks: Vec<SpecTask> = Vec::with_capacity(raw_items.len());
+
+    for (idx, (raw_title, raw_body, explicit_wave)) in raw_items.into_iter().enumerate() {
+        let combined = if raw_body.is_empty() {
+            raw_title.clone()
+        } else {
+            format!("{raw_title}\n{raw_body}")
+        };
+        let (clean_title, dep_hints) = extract_inline_dependencies(&raw_title);
+        let (_, body_hints) = if dep_hints.is_empty() && !raw_body.is_empty() {
+            extract_inline_dependencies(&raw_body)
+        } else {
+            (String::new(), Vec::new())
+        };
+        let all_hints: Vec<String> = dep_hints.into_iter().chain(body_hints).collect();
+
+        let mut resolved_steps: Vec<String> = Vec::new();
+        let mut dep_max_wave: i64 = 0;
+
+        for hint in &all_hints {
+            if let Some(dep_task) = resolve_hint_to_task(hint, &tasks) {
+                if !resolved_steps.contains(&dep_task.step) {
+                    resolved_steps.push(dep_task.step.clone());
+                }
+                dep_max_wave = dep_max_wave.max(dep_task.wave);
+            }
+        }
+
+        let depends_on = if resolved_steps.is_empty() {
+            None
+        } else {
+            Some(resolved_steps.join(", "))
+        };
+
+        let wave = explicit_wave.unwrap_or(1).max(dep_max_wave + 1);
+        let title = if clean_title.is_empty() {
+            raw_title.trim().to_string()
+        } else {
+            clean_title
+        };
+        let objective = if raw_body.trim().is_empty() {
+            title.clone()
+        } else {
+            raw_body.trim().to_string()
+        };
+
+        let files = extract_freeform_paths(&combined);
+        let lower = combined.to_lowercase();
+        let (files_create, files_modify) = if lower.contains("modify") || lower.contains("update") || lower.contains("refactor") {
+            (Vec::new(), files)
+        } else {
+            (files, Vec::new())
+        };
+
+        let verify_deploy = lower.contains("deploy") || lower.contains("verify");
+
+        tasks.push(SpecTask {
+            phase: "1".to_string(),
+            step: format!("1.{}", idx + 1),
+            title,
+            objective,
+            files_create,
+            files_modify,
+            wave,
+            depends_on,
+            verify_deploy,
+        });
+    }
+
+    tasks
+}
+
+fn parse_bullet_line(line: &str) -> Option<String> {
+    let t = line.trim();
+    if let Some(rest) = t.strip_prefix("- ").or_else(|| t.strip_prefix("* ")) {
+        let rest = rest.trim();
+        if !rest.is_empty() {
+            return Some(rest.to_string());
+        }
+    }
+    // Numbered list: "1. ..." or "1) ..."
+    let digit_end = t.bytes().take_while(|b| b.is_ascii_digit()).count();
+    if digit_end > 0 {
+        let after_digits = &t[digit_end..];
+        if let Some(rest) = after_digits.strip_prefix(". ").or_else(|| after_digits.strip_prefix(") ")) {
+            let rest = rest.trim();
+            if !rest.is_empty() {
+                return Some(rest.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn parse_subheading(line: &str) -> Option<String> {
+    let t = line.trim();
+    if t.starts_with("## ") || t.starts_with("### ") || t.starts_with("#### ") {
+        let title = t.trim_start_matches('#').trim();
+        if !title.is_empty() {
+            return Some(title.to_string());
+        }
+    }
+    None
+}
+
+fn extract_wave_hint(text: &str) -> Option<i64> {
+    let lower = text.to_lowercase();
+    for prefix in ["wave ", "phase "] {
+        if let Some(idx) = lower.find(prefix) {
+            let rest = &lower[idx + prefix.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<i64>() {
+                if n > 0 {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn extract_freeform_items(content: &str) -> Vec<(String, String, Option<i64>)> {
+    // 1. Collect ## / ### / #### sections if any
+    let mut sections: Vec<(String, Vec<String>)> = Vec::new();
+    let mut loose_bullets: Vec<String> = Vec::new();
+    let mut has_subheadings = false;
+
+    for line in content.lines() {
+        if let Some(h) = parse_subheading(line) {
+            has_subheadings = true;
+            sections.push((h, Vec::new()));
+        } else if let Some(cur) = sections.last_mut() {
+            cur.1.push(line.to_string());
+        } else if let Some(b) = parse_bullet_line(line) {
+            loose_bullets.push(b);
+        }
+    }
+
+    if has_subheadings {
+        let mut items = Vec::new();
+        for b in loose_bullets {
+            items.push((b, String::new(), None));
+        }
+        for (heading, body_lines) in sections {
+            let heading_wave = extract_wave_hint(&heading);
+            let bullets_in_section: Vec<String> = body_lines
+                .iter()
+                .filter_map(|l| parse_bullet_line(l))
+                .collect();
+            let prose_lines: Vec<String> = body_lines
+                .iter()
+                .filter(|l| {
+                    let t = l.trim();
+                    !t.is_empty() && parse_bullet_line(l).is_none()
+                })
+                .map(|l| l.trim().to_string())
+                .collect();
+
+            if prose_lines.is_empty() && !bullets_in_section.is_empty() {
+                for b in bullets_in_section {
+                    items.push((b, String::new(), heading_wave));
+                }
+            } else {
+                let body = body_lines.join("\n").trim().to_string();
+                items.push((heading, body, heading_wave));
+            }
+        }
+        if !items.is_empty() {
+            return items;
+        }
+    }
+
+    // 2. Bullet / numbered items without subheadings
+    let bullets: Vec<String> = content.lines().filter_map(parse_bullet_line).collect();
+    if !bullets.is_empty() {
+        return bullets
+            .into_iter()
+            .map(|b| (b, String::new(), None))
+            .collect();
+    }
+
+    // 3. Fallback: non-empty paragraphs (ignoring a standalone `# Title` header if other paragraphs exist)
+    let paragraphs: Vec<String> = content
+        .split("\n\n")
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+
+    let non_title: Vec<String> = paragraphs
+        .iter()
+        .filter(|p| !p.starts_with("# ") || p.contains('\n'))
+        .cloned()
+        .collect();
+
+    let chosen = if non_title.is_empty() {
+        paragraphs
+    } else {
+        non_title
+    };
+
+    chosen
+        .into_iter()
+        .map(|p| {
+            let cleaned = p.trim_start_matches('#').trim().to_string();
+            let first_line = cleaned.lines().next().unwrap_or("").trim().to_string();
+            (first_line, cleaned, None)
+        })
+        .collect()
+}
+
+fn extract_inline_dependencies(text: &str) -> (String, Vec<String>) {
+    let lower = text.to_lowercase();
+    let mut hints = Vec::new();
+    let mut cleaned = text.to_string();
+
+    if let Some(start_paren) = lower.find("(depends on ") {
+        if let Some(rel_end) = text[start_paren..].find(')') {
+            let end_paren = start_paren + rel_end;
+            let inner = &text[start_paren + "(depends on ".len()..end_paren];
+            for token in inner.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                hints.push(token.to_string());
+            }
+            cleaned = format!(
+                "{}{}",
+                text[..start_paren].trim_end(),
+                text[end_paren + 1..].trim_start()
+            )
+            .trim()
+            .to_string();
+        }
+    } else if let Some(idx) = lower.find("depends on:") {
+        let rest = &text[idx + "depends on:".len()..];
+        let clause = rest.lines().next().unwrap_or("").split('·').next().unwrap_or("");
+        for token in clause.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            hints.push(token.to_string());
+        }
+    }
+
+    (cleaned, hints)
+}
+
+fn resolve_hint_to_task<'a>(hint: &str, prior_tasks: &'a [SpecTask]) -> Option<&'a SpecTask> {
+    let h = hint.trim().trim_matches(|c: char| c == '`' || c == '"' || c == '\'');
+    if h.is_empty() || h == "—" || h == "-" || h.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    // Exact step match (e.g. "1.1" or "1-1.1")
+    let step_needle = h.strip_prefix("1-").unwrap_or(h);
+    if let Some(t) = prior_tasks.iter().find(|t| t.step == step_needle) {
+        return Some(t);
+    }
+    // Slug / keyword match against title, objective, or file paths
+    let h_lower = h.to_lowercase();
+    prior_tasks.iter().find(|t| {
+        t.title.to_lowercase().contains(&h_lower)
+            || t.objective.to_lowercase().contains(&h_lower)
+            || t.files_create.iter().any(|f| f.to_lowercase().contains(&h_lower))
+            || t.files_modify.iter().any(|f| f.to_lowercase().contains(&h_lower))
+    })
+}
+
+fn extract_freeform_paths(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for token in text.split_whitespace() {
+        let clean = token.trim_matches(|c: char| !c.is_alphanumeric() && c != '.' && c != '_' && c != '/' && c != '-');
+        if (clean.contains('/')
+            || clean.contains(".tsx")
+            || clean.contains(".ts")
+            || clean.contains(".rs")
+            || clean.contains(".py")
+            || clean.contains(".md")
+            || clean.contains(".json")
+            || clean.contains(".sql"))
+            && !out.contains(&clean.to_string())
+        {
+            out.push(clean.to_string());
+        }
+    }
+    out
+}
+
 fn build_task(phase: &str, step_id: &str, title: &str, body: &[String]) -> Option<SpecTask> {
     let body_text = body.join("\n");
 
@@ -400,5 +696,38 @@ Acceptance: All 5 tests pass
         assert!(md.contains("Step 1.1"));
         assert!(md.contains("Test obj"));
         assert!(md.contains("foo.tsx"));
+    }
+
+    #[test]
+    fn test_parses_freeform_prd_and_bullets() {
+        let prd = r#"
+# Todo App Spec
+- Build SQLite todo repository in src/db.ts
+- Build REST endpoints in src/api.ts (depends on db)
+- Build React TodoList component in src/TodoList.tsx (depends on 1.2)
+"#;
+        let tasks = parse_spec_or_prompt(prd);
+        assert_eq!(tasks.len(), 3, "expected 3 tasks from bullet PRD, got {:?}", tasks);
+        assert_eq!(tasks[0].step, "1.1");
+        assert_eq!(tasks[0].wave, 1);
+        assert_eq!(tasks[0].depends_on, None);
+
+        assert_eq!(tasks[1].step, "1.2");
+        assert_eq!(tasks[1].depends_on, Some("1.1".to_string()));
+        assert_eq!(tasks[1].wave, 2);
+
+        assert_eq!(tasks[2].step, "1.3");
+        assert_eq!(tasks[2].depends_on, Some("1.2".to_string()));
+        assert_eq!(tasks[2].wave, 3);
+
+        // Structured gap closure plans still work via parse_spec_or_prompt
+        let structured = parse_spec_or_prompt(SAMPLE);
+        assert_eq!(structured.len(), 4);
+
+        // Plain paragraph prompt fallback
+        let plain = "Implement dark mode theme persistence in src/stores/settingsStore.ts\n\nAdd unit tests in src/__tests__/settings.test.ts";
+        let plain_tasks = parse_spec_or_prompt(plain);
+        assert_eq!(plain_tasks.len(), 2);
+        assert_eq!(plain_tasks[0].wave, 1);
     }
 }

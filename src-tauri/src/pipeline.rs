@@ -609,10 +609,10 @@ fn stage_parse_spec(
 ) -> Result<StageResult, String> {
     let content = std::fs::read_to_string(&opts.spec_path)
         .map_err(|e| format!("Cannot read spec '{}': {e}", opts.spec_path))?;
-    let tasks = crate::spec_parser::parse_gap_closure_plan(&content);
+    let tasks = crate::spec_parser::parse_spec_or_prompt(&content);
     if tasks.is_empty() {
         return Err(format!(
-            "No tasks parsed from spec '{}' — expected '## Phase N' + '### Step X.Y' headers",
+            "No tasks parsed from spec '{}' — document produced no actionable tasks",
             opts.spec_path
         ));
     }

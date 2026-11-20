@@ -51,6 +51,9 @@ export default function Orchestrate() {
   const [newProjectId, setNewProjectId] = useState("acc-main");
   const [newAgent, setNewAgent] = useState({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const activeTab: TabId = location.pathname.includes("/handoffs")
     ? "handoffs"
@@ -68,13 +71,15 @@ export default function Orchestrate() {
   };
 
   useEffect(() => {
-    if (!hasLoaded && store.wavePlans.length === 0) {
+    if (!hasLoaded) {
       setHasLoaded(true);
+      void store.getWavePlans().catch(() => {});
     }
-  }, [store.wavePlans.length, hasLoaded]);
+  }, [hasLoaded, store]);
 
   const handleCreatePlan = async () => {
     if (!newSlug.trim()) return;
+    setActionError(null);
     const plan = await store.createWavePlan(newProjectId, newSlug);
     setSelectedPlanId(plan.id);
     setNewSlug("");
@@ -83,17 +88,50 @@ export default function Orchestrate() {
 
   const handleAddAgent = async () => {
     if (!selectedPlanId || !newAgent.agentRef.trim() || !newAgent.task.trim()) return;
-    await store.addPlanAgent(
-      selectedPlanId,
-      newAgent.agentRef,
-      newAgent.task,
-      parseInt(newAgent.wave) || 1,
-      newAgent.dependsOn || undefined,
-      newAgent.agentId || undefined
-    );
-    setNewAgent({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
-    await store.getPlanAgents(selectedPlanId);
-    await store.getCorrections(selectedPlanId);
+    setActionError(null);
+    try {
+      await store.addPlanAgent(
+        selectedPlanId,
+        newAgent.agentRef,
+        newAgent.task,
+        parseInt(newAgent.wave) || 1,
+        newAgent.dependsOn || undefined,
+        newAgent.agentId || undefined
+      );
+      setNewAgent({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
+      await store.getPlanAgents(selectedPlanId);
+      await store.getCorrections(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleExecuteWave = async () => {
+    if (!selectedPlanId) return;
+    setActionError(null);
+    setIsExecuting(true);
+    try {
+      await store.executeWave(selectedPlanId, ".", "main", "opencode", []);
+      await store.getPlanAgents(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const handleVerifyAndFinalize = async () => {
+    if (!selectedPlanId || !store.lastWaveReport) return;
+    setActionError(null);
+    setIsFinalizing(true);
+    try {
+      await store.finalizeWave(store.lastWaveReport, ".");
+      await store.getPlanAgents(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsFinalizing(false);
+    }
   };
 
   const handleUpdateStatus = async (agentId: string, status: string) => {
@@ -213,6 +251,92 @@ export default function Orchestrate() {
       {/* Selected Plan Content */}
       {selectedPlanId && (
         <>
+          {/* Execution & Verification Controls */}
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Waves className="size-4 text-[#58a6ff]" />
+                <span className="text-sm font-medium text-gray-200">Wave Execution</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  size="sm"
+                  onClick={handleExecuteWave}
+                  disabled={isExecuting || isFinalizing}
+                  className="gap-1.5"
+                >
+                  <Play className="size-3.5" />
+                  {isExecuting ? "Executing..." : "Execute Wave Plan"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleVerifyAndFinalize}
+                  disabled={!store.lastWaveReport || isExecuting || isFinalizing}
+                  className="gap-1.5"
+                >
+                  <CheckCircle2 className="size-3.5" />
+                  {isFinalizing ? "Verifying..." : "Verify & Finalize"}
+                </Button>
+              </div>
+            </div>
+
+            {actionError && (
+              <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                {actionError}
+              </div>
+            )}
+
+            {store.lastWaveReport && store.lastWaveReport.plan_id === selectedPlanId && (
+              <div className="space-y-2 border-t border-[#30363d] pt-3 text-xs">
+                <div className="flex items-center justify-between text-gray-400">
+                  <span>Execution Report ({store.lastWaveReport.agents.length} agents)</span>
+                  <span>Cost: ${store.lastWaveReport.total_cost_usd.toFixed(4)}</span>
+                </div>
+                <div className="space-y-1">
+                  {store.lastWaveReport.agents.map((exec) => (
+                    <div
+                      key={`${exec.agent_ref}-${exec.session_id}`}
+                      className="flex items-center justify-between rounded bg-[#0d1117] px-2.5 py-1.5"
+                    >
+                      <span className="font-mono text-gray-200">
+                        {exec.agent_ref} ({exec.branch})
+                      </span>
+                      <Badge variant="outline" className={cn("text-xs", STATUS_COLORS[exec.status] || STATUS_COLORS.queued)}>
+                        {exec.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {store.lastVerification && (
+              <div className="space-y-2 border-t border-[#30363d] pt-3 text-xs">
+                <div className="flex items-center gap-2">
+                  {store.lastVerification.passed ? (
+                    <CheckCircle2 className="size-4 text-green-400" />
+                  ) : (
+                    <XCircle className="size-4 text-red-400" />
+                  )}
+                  <span className={store.lastVerification.passed ? "text-green-400 font-medium" : "text-red-400 font-medium"}>
+                    Verification {store.lastVerification.passed ? "Passed" : "Failed"}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  {store.lastVerification.checks.map((chk) => (
+                    <div key={chk.name} className="flex items-center justify-between rounded bg-[#0d1117] px-2.5 py-1">
+                      <span className="text-gray-300">{chk.name}</span>
+                      <span className="text-gray-400">
+                        {typeof chk.status === "string" ? chk.status : "Fail"}{chk.detail ? ` — ${chk.detail}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Card>
+
           {/* Add Agent */}
           <Card className="p-4 space-y-3">
             <div className="flex items-center gap-2">

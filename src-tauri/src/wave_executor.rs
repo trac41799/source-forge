@@ -176,6 +176,13 @@ pub async fn finalize_wave(
         let handoff_path = std::path::Path::new(&agent_exec.worktree_path)
             .join(format!("HANDOFF_{}.md", agent_exec.agent_ref));
 
+        // Earlier topological tiers are finalized and merged (removing their
+        // worktree) before subsequent tiers spawn; preserve their "done" status.
+        if agent_exec.status == "done" && !std::path::Path::new(&agent_exec.worktree_path).exists() {
+            total += agent_exec.cost_usd;
+            continue;
+        }
+
         match handoff_parser::parse_handoff_file(&handoff_path) {
             Ok(_env) => {
                 agent_exec.status = "done".to_string();
@@ -401,15 +408,16 @@ pub async fn execute_wave_with_adapters(
     config: WaveRunConfig,
     registry: &AdapterRegistry,
 ) -> Result<WaveExecutionReport, String> {
-    // 1. Read plan agents from DB
+    // 1. Read plan agents from DB and validate the dependency DAG
     let plan_agents = {
         let conn = db.lock().map_err(|e| e.to_string())?;
         orchestrator::get_plan_agents(&conn, &config.plan_id)?
     };
+    let tiers = orchestrator::validate_wave_plan(&plan_agents)?;
 
     // 2. Check if we can resume from a previous state
     let existing_state = wave_persistence::load_wave_state(&config.plan_id).ok();
-    
+
     if let Some(state) = existing_state {
         // Resume from checkpoint
         return resume_wave_from_state(db, config, registry, state).await;
@@ -429,80 +437,29 @@ pub async fn execute_wave_with_adapters(
         );
     }
 
-    let mut report = WaveExecutionReport {
-        plan_id: config.plan_id.clone(),
-        base_repo: config.base_repo.clone(),
-        agents: Vec::new(),
-        started_at: chrono::Utc::now().to_rfc3339(),
-        completed_at: None,
-        total_cost_usd: 0.0,
-    };
-
     // 4. Get the adapter for the specified agent command
     let adapter = registry
         .get(&config.agent_command)
         .ok_or_else(|| format!("No adapter found for agent: {}", config.agent_command))?;
 
-    // 5. For each agent: create worktree + write guideline + spawn via adapter
-    for agent in &plan_agents {
-        // Absolute path *inside the base repo*: a bare `.worktrees/...` is
-        // resolved by git relative to the repo (`-C`) but by the guideline
-        // writer / agent CWD relative to the process, so the agent would run in
-        // a stray empty directory with only `.acc/GUIDELINE.md` in it.
-        let worktree_path = Path::new(&config.base_repo)
-            .join(".worktrees")
-            .join(format!("{}-{}", config.plan_id, agent.agent_ref))
-            .to_string_lossy()
-            .to_string();
-        let branch = format!("agent/{}-{}", config.plan_id, agent.agent_ref);
-
-        // 5a. Create the worktree
-        worktree::create_worktree(
-            &config.base_repo,
-            &branch,
-            &worktree_path,
-            &config.base_branch,
-        )?;
-
-        // 5b. Write guideline
-        let (guideline_path, _spawn_args) = guideline_spawn::prepare_spawn(
-            &worktree_path,
-            &agent.agent_ref,
-            &agent.task,
-            &agent.task,
-            agent.depends_on.as_deref(),
-            &["mimo-v2.5"],
-            &[],
-            &[],
-            &config.agent_base_args,
-        )?;
-
-        // Prompt with a short, constant pointer to the guideline file instead of
-        // inlining its content. The guideline carries spec-derived text, and on
-        // Windows agents are launched through `cmd /C`, where arbitrary text in
-        // an argument is a command-injection vector (and can exceed the
-        // command-line length limit for large specs). Reading `.acc/GUIDELINE.md`
-        // is the phrasing proven to work in the dogfood probe.
-        let task_prompt = if guideline_path.exists() {
-            "Implement the task described in .acc/GUIDELINE.md in this worktree, \
-             then write the HANDOFF file it names in the repository root."
-                .to_string()
-        } else {
-            agent.task.clone()
+    // 5. Multi-tier topological execution vs single-tier non-blocking spawn
+    let report = if tiers.len() > 1 {
+        execute_topological_waves_with_adapters(db, &config, adapter, &tiers).await?
+    } else {
+        let mut single_report = WaveExecutionReport {
+            plan_id: config.plan_id.clone(),
+            base_repo: config.base_repo.clone(),
+            agents: Vec::new(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            total_cost_usd: 0.0,
         };
-        let session = adapter.spawn(&task_prompt, &worktree_path)?;
-
-        report.agents.push(AgentExecution {
-            agent_ref: agent.agent_ref.clone(),
-            session_id: session.id.clone(),
-            worktree_path: worktree_path.clone(),
-            branch,
-            status: "running".to_string(),
-            guideline_path: guideline_path.to_string_lossy().to_string(),
-            cost_usd: 0.0,
-            retry_count: 0,
-        });
-    }
+        for agent in &plan_agents {
+            let exec = spawn_plan_agent_with_adapter(&config, adapter, agent)?;
+            single_report.agents.push(exec);
+        }
+        single_report
+    };
 
     // 6. Save wave state for crash recovery (Feature 2 integration)
     let wave_state = WaveState {
@@ -527,7 +484,223 @@ pub async fn execute_wave_with_adapters(
             rusqlite::params![config.plan_id],
         );
     }
+    let mut report = report;
     report.completed_at = Some(chrono::Utc::now().to_rfc3339());
+
+    Ok(report)
+}
+
+fn spawn_plan_agent_with_adapter(
+    config: &WaveRunConfig,
+    adapter: &dyn crate::agent_adapters::AgentAdapter,
+    agent: &orchestrator::PlanAgent,
+) -> Result<AgentExecution, String> {
+    // Absolute path *inside the base repo*: a bare `.worktrees/...` is
+    // resolved by git relative to the repo (`-C`) but by the guideline
+    // writer / agent CWD relative to the process, so the agent would run in
+    // a stray empty directory with only `.acc/GUIDELINE.md` in it.
+    let worktree_path = Path::new(&config.base_repo)
+        .join(".worktrees")
+        .join(format!("{}-{}", config.plan_id, agent.agent_ref))
+        .to_string_lossy()
+        .to_string();
+    let branch = format!("agent/{}-{}", config.plan_id, agent.agent_ref);
+
+    worktree::create_worktree(
+        &config.base_repo,
+        &branch,
+        &worktree_path,
+        &config.base_branch,
+    )?;
+
+    let (guideline_path, _spawn_args) = guideline_spawn::prepare_spawn(
+        &worktree_path,
+        &agent.agent_ref,
+        &agent.task,
+        &agent.task,
+        agent.depends_on.as_deref(),
+        &["mimo-v2.5"],
+        &[],
+        &[],
+        &config.agent_base_args,
+    )?;
+
+    // Prompt with a short, constant pointer to the guideline file instead of
+    // inlining its content.
+    let task_prompt = if guideline_path.exists() {
+        "Implement the task described in .acc/GUIDELINE.md in this worktree, \
+         then write the HANDOFF file it names in the repository root."
+            .to_string()
+    } else {
+        agent.task.clone()
+    };
+    let session = adapter.spawn(&task_prompt, &worktree_path)?;
+
+    Ok(AgentExecution {
+        agent_ref: agent.agent_ref.clone(),
+        session_id: session.id.clone(),
+        worktree_path,
+        branch,
+        status: "running".to_string(),
+        guideline_path: guideline_path.to_string_lossy().to_string(),
+        cost_usd: 0.0,
+        retry_count: 0,
+    })
+}
+
+struct RegistryAgentControl<'a> {
+    adapter: &'a dyn crate::agent_adapters::AgentAdapter,
+    agent_command: &'a str,
+}
+
+impl<'a> crate::wave_supervisor::AgentControl for RegistryAgentControl<'a> {
+    fn kill(&self, agent: &AgentExecution) -> Result<(), String> {
+        self.adapter.kill(&AgentSession {
+            id: agent.session_id.clone(),
+            agent_id: self.agent_command.to_string(),
+            worktree: agent.worktree_path.clone(),
+            started_at: chrono::Utc::now(),
+        })
+    }
+
+    fn respawn(&self, agent: &AgentExecution) -> Result<String, String> {
+        let guideline = Path::new(&agent.worktree_path)
+            .join(".acc")
+            .join("GUIDELINE.md");
+        let task = std::fs::read_to_string(&guideline)
+            .ok()
+            .filter(|content| !content.trim().is_empty())
+            .unwrap_or_else(|| {
+                format!(
+                    "Continue task {}: follow .acc/GUIDELINE.md and write HANDOFF_{}.md",
+                    agent.agent_ref, agent.agent_ref
+                )
+            });
+        Ok(self.adapter.spawn(&task, &agent.worktree_path)?.id)
+    }
+
+    fn is_running(&self, agent: &AgentExecution) -> bool {
+        self.adapter.is_running(&AgentSession {
+            id: agent.session_id.clone(),
+            agent_id: self.agent_command.to_string(),
+            worktree: agent.worktree_path.clone(),
+            started_at: chrono::Utc::now(),
+        })
+    }
+
+    fn cost_usd(&self, agent: &AgentExecution) -> Option<f64> {
+        self.adapter.session_cost(&AgentSession {
+            id: agent.session_id.clone(),
+            agent_id: self.agent_command.to_string(),
+            worktree: agent.worktree_path.clone(),
+            started_at: chrono::Utc::now(),
+        })
+    }
+}
+
+/// Execute topological wave tiers sequentially: each non-final tier is supervised,
+/// finalized, and merged into `config.base_branch` before the next tier's worktrees
+/// are created so dependent agents start with upstream changes already merged.
+pub async fn execute_topological_waves_with_adapters(
+    db: &Mutex<Connection>,
+    config: &WaveRunConfig,
+    adapter: &dyn crate::agent_adapters::AgentAdapter,
+    tiers: &[Vec<orchestrator::PlanAgent>],
+) -> Result<WaveExecutionReport, String> {
+    let mut report = WaveExecutionReport {
+        plan_id: config.plan_id.clone(),
+        base_repo: config.base_repo.clone(),
+        agents: Vec::new(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        completed_at: None,
+        total_cost_usd: 0.0,
+    };
+
+    let control = RegistryAgentControl {
+        adapter,
+        agent_command: &config.agent_command,
+    };
+    let sup_config = crate::wave_supervisor::SupervisionConfig {
+        timeout: std::time::Duration::from_secs(config.deadline_secs.unwrap_or(300).max(1)),
+        poll_interval: std::time::Duration::from_millis(200),
+        max_retries: 1,
+        cost_cap_usd: config.cost_cap_usd,
+    };
+
+    for (tier_idx, tier_agents) in tiers.iter().enumerate() {
+        let mut tier_report = WaveExecutionReport {
+            plan_id: config.plan_id.clone(),
+            base_repo: config.base_repo.clone(),
+            agents: Vec::new(),
+            started_at: chrono::Utc::now().to_rfc3339(),
+            completed_at: None,
+            total_cost_usd: 0.0,
+        };
+
+        for agent in tier_agents {
+            let exec = spawn_plan_agent_with_adapter(config, adapter, agent)?;
+            tier_report.agents.push(exec);
+        }
+
+        if tier_idx + 1 < tiers.len() {
+            let outcome = crate::wave_supervisor::supervise_agents(
+                db,
+                &mut tier_report,
+                &sup_config,
+                &control,
+                &|| false,
+            )?;
+            if outcome.cancelled {
+                report.agents.extend(tier_report.agents);
+                return Err(format!("Wave execution cancelled during tier {}", tier_idx + 1));
+            }
+
+            let finalized_tier = finalize_wave(db, tier_report).await?;
+            let failed_refs: Vec<String> = finalized_tier
+                .agents
+                .iter()
+                .filter(|a| a.status != "done")
+                .map(|a| a.agent_ref.clone())
+                .collect();
+
+            if Path::new(&config.base_repo).join(".git").exists() {
+                let merges = merge_completed_agents(
+                    &finalized_tier,
+                    &config.base_repo,
+                    &config.base_branch,
+                );
+                if !merges.conflicts.is_empty() {
+                    let detail = merges
+                        .conflicts
+                        .iter()
+                        .map(|c| format!("{}: {}", c.agent_ref, c.detail))
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    report.agents.extend(finalized_tier.agents);
+                    return Err(format!(
+                        "Failed to merge tier {} before starting tier {}: {}",
+                        tier_idx + 1,
+                        tier_idx + 2,
+                        detail
+                    ));
+                }
+            }
+
+            report.total_cost_usd += finalized_tier.total_cost_usd;
+            report.agents.extend(finalized_tier.agents);
+
+            if !failed_refs.is_empty() {
+                return Err(format!(
+                    "Tier {} agent(s) failed before tier {} could start: {}",
+                    tier_idx + 1,
+                    tier_idx + 2,
+                    failed_refs.join(", ")
+                ));
+            }
+        } else {
+            report.agents.extend(tier_report.agents);
+        }
+    }
 
     Ok(report)
 }
@@ -1271,5 +1444,97 @@ mod tests {
         )
         .unwrap();
         assert!(detail.contains("not a git repo"), "{detail}");
+    }
+
+    #[tokio::test]
+    async fn test_topological_wave_execution_merges_wave1_before_spawning_wave2() {
+        use crate::agent_adapters::{AdapterRegistry, AgentAdapter, AgentSession};
+        use std::sync::Arc;
+
+        struct WaveOrderingAdapter {
+            saw_schema_in_wave2: Arc<std::sync::atomic::AtomicBool>,
+        }
+
+        impl AgentAdapter for WaveOrderingAdapter {
+            fn name(&self) -> &str { "wave-ordering-test" }
+            fn version(&self) -> &str { "1.0.0" }
+            fn spawn(&self, _task: &str, worktree: &str) -> Result<AgentSession, String> {
+                let wt = Path::new(worktree);
+                if worktree.ends_with("1-1") {
+                    std::fs::write(wt.join("schema.ts"), "export interface UserSchema { id: string; }\n").unwrap();
+                    std::fs::write(
+                        wt.join("HANDOFF_1-1.md"),
+                        "## Original Task\nschema\n\n## Completed By\ntest\n\n## Model Used\nmock\n\n\
+                         ## Output Summary\nwrote schema.ts\n\n## Completed Work\nCreated schema.ts\n\n\
+                         ## Test Results\npass\n\n## Interface Contracts Exposed\nUserSchema\n\n\
+                         ## Files NOT Modified\nnone\n\n## Design Decisions\nnone\n\n\
+                         ## Handoff Instructions\nImport UserSchema\n",
+                    ).unwrap();
+                } else if worktree.ends_with("2-1") {
+                    if wt.join("schema.ts").exists() {
+                        self.saw_schema_in_wave2.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    std::fs::write(wt.join("api.ts"), "import type { UserSchema } from './schema';\n").unwrap();
+                    std::fs::write(
+                        wt.join("HANDOFF_2-1.md"),
+                        "## Original Task\napi\n\n## Completed By\ntest\n\n## Model Used\nmock\n\n\
+                         ## Output Summary\nwrote api.ts\n\n## Completed Work\nCreated api.ts\n\n\
+                         ## Test Results\npass\n\n## Interface Contracts Exposed\nAPI\n\n\
+                         ## Files NOT Modified\nnone\n\n## Design Decisions\nnone\n\n\
+                         ## Handoff Instructions\ndone\n",
+                    ).unwrap();
+                }
+                Ok(AgentSession {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    agent_id: "wave-ordering-test".to_string(),
+                    worktree: worktree.to_string(),
+                    started_at: chrono::Utc::now(),
+                })
+            }
+            fn kill(&self, _session: &AgentSession) -> Result<(), String> { Ok(()) }
+            fn stream_output(&self, _session: &AgentSession) -> Result<Vec<String>, String> { Ok(vec![]) }
+            fn parse_cost(&self, _output: &str) -> Option<f64> { None }
+            fn is_running(&self, _session: &AgentSession) -> bool { false }
+        }
+
+        let repo = create_test_repo();
+        let repo_path = repo.path().to_str().unwrap().to_string();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../migrations/001_init.sql")).unwrap();
+        conn.execute(
+            "INSERT INTO projects (id, path, name, created_at, updated_at) VALUES ('proj-dag', ?1, 'proj-dag', datetime('now'), datetime('now'))",
+            rusqlite::params![repo_path],
+        ).unwrap();
+        let plan = orchestrator::create_wave_plan(&conn, "proj-dag", "multi-wave").unwrap();
+        orchestrator::add_plan_agent(&conn, &plan.id, "1-1", "Create schema.ts", 1, None, None).unwrap();
+        orchestrator::add_plan_agent(&conn, &plan.id, "2-1", "Create api.ts", 2, Some("1-1"), None).unwrap();
+        let db = Mutex::new(conn);
+
+        let saw_schema = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let mut registry = AdapterRegistry::new();
+        registry.register(
+            "wave-ordering-test".to_string(),
+            Box::new(WaveOrderingAdapter { saw_schema_in_wave2: saw_schema.clone() }),
+        );
+
+        let cfg = WaveRunConfig {
+            plan_id: plan.id.clone(),
+            base_repo: repo_path.clone(),
+            base_branch: "main".to_string(),
+            agent_command: "wave-ordering-test".to_string(),
+            agent_base_args: vec![],
+            deadline_secs: Some(30),
+            cost_cap_usd: None,
+        };
+
+        let report = execute_wave_with_adapters(&db, cfg, &registry).await.unwrap();
+        assert_eq!(report.agents.len(), 2);
+        assert!(
+            saw_schema.load(std::sync::atomic::Ordering::SeqCst),
+            "Wave 2 agent 2-1's worktree MUST already contain schema.ts from merged Wave 1 before 2-1 spawns"
+        );
+        // Cleanup any remaining wave state file
+        let _ = std::fs::remove_file(format!(".acc/waves/{}.json", plan.id));
     }
 }

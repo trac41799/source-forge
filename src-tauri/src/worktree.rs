@@ -45,6 +45,7 @@ pub fn create_worktree(
         if !status.success() {
             // Already registered at this path? Then there is nothing to do.
             if Path::new(worktree_path).join(".git").exists() {
+                link_shared_dependencies(repo_path, worktree_path);
                 return Ok(PathBuf::from(worktree_path));
             }
             return Err(format!(
@@ -52,6 +53,7 @@ pub fn create_worktree(
                 status.code()
             ));
         }
+        link_shared_dependencies(repo_path, worktree_path);
         return Ok(PathBuf::from(worktree_path));
     }
 
@@ -71,7 +73,54 @@ pub fn create_worktree(
         return Err(format!("git worktree add exited with {:?}", status.code()));
     }
 
+    link_shared_dependencies(repo_path, worktree_path);
     Ok(PathBuf::from(worktree_path))
+}
+
+fn strip_windows_verbatim_prefix(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    if let Some(stripped) = s.strip_prefix(r"\\?\") {
+        PathBuf::from(stripped)
+    } else {
+        p.to_path_buf()
+    }
+}
+
+/// Link `<base_repo>/node_modules` into `<worktree_path>/node_modules` via a
+/// directory junction on Windows or symlink on Unix. Non-fatal if permissions
+/// prevent linking.
+fn link_shared_dependencies(base_repo: &str, worktree_path: &str) {
+    let base_nm = Path::new(base_repo).join("node_modules");
+    let wt_nm = Path::new(worktree_path).join("node_modules");
+    if !base_nm.exists() || wt_nm.exists() || wt_nm.symlink_metadata().is_ok() {
+        return;
+    }
+
+    let abs_base = std::fs::canonicalize(&base_nm)
+        .map(|p| strip_windows_verbatim_prefix(&p))
+        .unwrap_or_else(|_| base_nm.clone());
+    let abs_wt_parent = std::fs::canonicalize(worktree_path)
+        .map(|p| strip_windows_verbatim_prefix(&p))
+        .unwrap_or_else(|_| PathBuf::from(worktree_path));
+    let abs_wt_nm = abs_wt_parent.join("node_modules");
+
+    #[cfg(target_os = "windows")]
+    {
+        let _ = Command::new("cmd")
+            .args([
+                "/C",
+                "mklink",
+                "/J",
+                &abs_wt_nm.to_string_lossy(),
+                &abs_base.to_string_lossy(),
+            ])
+            .output();
+    }
+
+    #[cfg(unix)]
+    {
+        let _ = std::os::unix::fs::symlink(&abs_base, &abs_wt_nm);
+    }
 }
 
 /// Remove a worktree and its associated branch.
@@ -232,5 +281,27 @@ mod tests {
 
         // Verify FEATURE.md exists in the new worktree
         assert!(Path::new(&wt).join("FEATURE.md").exists());
+    }
+
+    #[test]
+    fn test_worktree_links_node_modules() {
+        let repo = create_test_repo();
+        let repo_path = repo.path().to_str().unwrap();
+
+        // Simulate installed dependencies in base_repo/node_modules
+        let nm_bin = repo.path().join("node_modules").join(".bin");
+        fs::create_dir_all(&nm_bin).unwrap();
+        fs::write(repo.path().join("node_modules").join("marker.txt"), "ok").unwrap();
+
+        let wt = repo.path().join("wt-nm").to_str().unwrap().to_string();
+        let result = create_worktree(repo_path, "nm-branch", &wt, "main");
+        assert!(result.is_ok(), "Expected Ok, got {:?}", result);
+
+        let wt_nm = Path::new(&wt).join("node_modules");
+        assert!(wt_nm.exists(), "worktree node_modules junction/symlink must exist");
+        assert!(
+            wt_nm.join("marker.txt").exists(),
+            "linked node_modules must expose marker.txt"
+        );
     }
 }
