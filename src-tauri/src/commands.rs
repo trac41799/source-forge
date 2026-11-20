@@ -655,6 +655,15 @@ pub async fn create_wave_plan_cmd(state: State<'_, AppState>, project_id: String
 }
 
 #[tauri::command]
+pub async fn get_wave_plans_cmd(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<orchestrator::WavePlan>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    orchestrator::get_wave_plans(&db, project_id.as_deref())
+}
+
+#[tauri::command]
 pub async fn add_plan_agent_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, task: String, wave: i64, depends_on: Option<String>, agent_id: Option<String>) -> Result<orchestrator::PlanAgent, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     orchestrator::add_plan_agent(&db, &plan_id, &agent_ref, &task, wave, depends_on.as_deref(), agent_id.as_deref())
@@ -705,8 +714,16 @@ pub async fn execute_wave_cmd(
         deadline_secs,
         cost_cap_usd,
     };
-    let pty = &state.pty_manager;
-    wave_executor::execute_wave_real(&state.db, pty, config).await
+    let registry = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::agent_adapters::AdapterRegistry::new_with_db(&conn)
+    };
+    if registry.get(&config.agent_command).is_some() {
+        wave_executor::execute_wave_with_adapters(&state.db, config, &registry).await
+    } else {
+        let pty = &state.pty_manager;
+        wave_executor::execute_wave_real(&state.db, pty, config).await
+    }
 }
 
 #[tauri::command]
@@ -727,7 +744,7 @@ pub async fn seed_wave_from_spec_cmd(
     use std::fs;
     let content = fs::read_to_string(&spec_path)
         .map_err(|e| format!("Failed to read spec: {}", e))?;
-    let tasks = spec_parser::parse_gap_closure_plan(&content);
+    let tasks = spec_parser::parse_spec_or_prompt(&content);
 
     if tasks.is_empty() {
         return Err("No tasks parsed from spec".to_string());

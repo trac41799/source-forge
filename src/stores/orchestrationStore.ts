@@ -220,9 +220,6 @@ interface OrchestrationStore {
   buildFeatureDocPrompt: (docType: string, sessionId: string, featureName: string) => Promise<string>;
 }
 
-const GET_WAVE_PLANS_CMD =
-  (IPC as Record<string, string>).getWavePlans ?? "get_wave_plans_cmd";
-
 export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
   suggestions: [],
   models: [],
@@ -252,7 +249,7 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
     await invoke("check_agent_version_cmd", { agentId });
   },
   getWavePlans: async (projectId) => {
-    const wavePlans = await invoke<WavePlan[]>(GET_WAVE_PLANS_CMD, {
+    const wavePlans = await invoke<WavePlan[]>(IPC.getWavePlans, {
       projectId: projectId ?? null,
     });
     set({ wavePlans: wavePlans ?? [] });

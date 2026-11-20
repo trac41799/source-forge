@@ -22,6 +22,7 @@ export const IPC = {
   getCompounderStatus: "get_compounder_status_cmd",
 
   // Orchestration / verification
+  getWavePlans: "get_wave_plans_cmd",
   executeWave: "execute_wave_cmd",
   finalizeWave: "finalize_wave_cmd",
   verifyAndFinalizeWave: "verify_and_finalize_wave_cmd",

@@ -53,6 +53,7 @@ export default function Orchestrate() {
   const [hasLoaded, setHasLoaded] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
+  const [selectedHarness, setSelectedHarness] = useState("opencode");
   const [actionError, setActionError] = useState<string | null>(null);
 
   const activeTab: TabId = location.pathname.includes("/handoffs")
@@ -111,7 +112,7 @@ export default function Orchestrate() {
     setActionError(null);
     setIsExecuting(true);
     try {
-      await store.executeWave(selectedPlanId, ".", "main", "opencode", []);
+      await store.executeWave(selectedPlanId, ".", "main", selectedHarness, []);
       await store.getPlanAgents(selectedPlanId);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : String(err));
@@ -259,6 +260,21 @@ export default function Orchestrate() {
                 <span className="text-sm font-medium text-gray-200">Wave Execution</span>
               </div>
               <div className="flex items-center gap-2">
+                <select
+                  aria-label="Execution Harness"
+                  value={selectedHarness}
+                  onChange={(e) => setSelectedHarness(e.target.value)}
+                  disabled={isExecuting || isFinalizing}
+                  className="h-8 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-xs text-gray-200"
+                >
+                  <option value="pi">Pi Agent (ACP)</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="opencode-acp">OpenCode (ACP)</option>
+                  <option value="claude">Claude Code (ACP)</option>
+                  <option value="codex">Codex CLI (ACP)</option>
+                  <option value="gemini">Gemini CLI (ACP)</option>
+                  <option value="mock">Mock</option>
+                </select>
                 <Button
                   size="sm"
                   onClick={handleExecuteWave}

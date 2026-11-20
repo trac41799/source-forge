@@ -75,7 +75,10 @@ async fn run_on_blocking_thread(
 ) -> Result<BuildReport, String> {
     let report = tauri::async_runtime::spawn_blocking(move || {
         let deployer = crate::deployer::VercelDeployer;
-        let registry = crate::agent_adapters::AdapterRegistry::new();
+        let registry = {
+            let conn = db.lock().map_err(|e| e.to_string())?;
+            crate::agent_adapters::AdapterRegistry::new_with_db(&conn)
+        };
         let wave_runner = crate::pipeline::AdapterWaveRunner {
             registry,
             agent_command: opts.agent_command.clone(),

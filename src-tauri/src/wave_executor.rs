@@ -96,6 +96,8 @@ pub async fn execute_wave_real(
         total_cost_usd: 0.0,
     };
 
+    let project_id = lookup_plan_project_id(db, &config.plan_id);
+
     // 3. For each agent: create worktree + write guideline + spawn
     for agent in &plan_agents {
         let worktree_path = format!(
@@ -124,6 +126,15 @@ pub async fn execute_wave_real(
             &[], // files_not_touch: TBD
             &config.agent_base_args,
         )?;
+        if let Ok(conn) = db.lock() {
+            let _ = guideline_spawn::append_project_context_to_guideline(
+                &conn,
+                &worktree_path,
+                &project_id,
+                &agent.agent_ref,
+                &[],
+            );
+        }
 
         // 3c. Spawn the agent with guards (from T2)
         let session_id = pty
@@ -442,6 +453,8 @@ pub async fn execute_wave_with_adapters(
         .get(&config.agent_command)
         .ok_or_else(|| format!("No adapter found for agent: {}", config.agent_command))?;
 
+    let project_id = lookup_plan_project_id(db, &config.plan_id);
+
     // 5. Multi-tier topological execution vs single-tier non-blocking spawn
     let report = if tiers.len() > 1 {
         execute_topological_waves_with_adapters(db, &config, adapter, &tiers).await?
@@ -455,7 +468,7 @@ pub async fn execute_wave_with_adapters(
             total_cost_usd: 0.0,
         };
         for agent in &plan_agents {
-            let exec = spawn_plan_agent_with_adapter(&config, adapter, agent)?;
+            let exec = spawn_plan_agent_with_adapter(db, &project_id, &config, adapter, agent)?;
             single_report.agents.push(exec);
         }
         single_report
@@ -490,7 +503,23 @@ pub async fn execute_wave_with_adapters(
     Ok(report)
 }
 
+fn lookup_plan_project_id(db: &Mutex<Connection>, plan_id: &str) -> String {
+    db.lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT project_id FROM feature_plans WHERE id = ?1",
+                rusqlite::params![plan_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .unwrap_or_default()
+}
+
 fn spawn_plan_agent_with_adapter(
+    db: &Mutex<Connection>,
+    project_id: &str,
     config: &WaveRunConfig,
     adapter: &dyn crate::agent_adapters::AgentAdapter,
     agent: &orchestrator::PlanAgent,
@@ -524,6 +553,15 @@ fn spawn_plan_agent_with_adapter(
         &[],
         &config.agent_base_args,
     )?;
+    if let Ok(conn) = db.lock() {
+        let _ = guideline_spawn::append_project_context_to_guideline(
+            &conn,
+            &worktree_path,
+            project_id,
+            &agent.agent_ref,
+            &[],
+        );
+    }
 
     // Prompt with a short, constant pointer to the guideline file instead of
     // inlining its content.
@@ -627,6 +665,7 @@ pub async fn execute_topological_waves_with_adapters(
         cost_cap_usd: config.cost_cap_usd,
     };
 
+    let project_id = lookup_plan_project_id(db, &config.plan_id);
     for (tier_idx, tier_agents) in tiers.iter().enumerate() {
         let mut tier_report = WaveExecutionReport {
             plan_id: config.plan_id.clone(),
@@ -638,7 +677,7 @@ pub async fn execute_topological_waves_with_adapters(
         };
 
         for agent in tier_agents {
-            let exec = spawn_plan_agent_with_adapter(config, adapter, agent)?;
+            let exec = spawn_plan_agent_with_adapter(db, &project_id, config, adapter, agent)?;
             tier_report.agents.push(exec);
         }
 

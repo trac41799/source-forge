@@ -200,6 +200,7 @@ pub fn run() {
             commands::check_agent_version_cmd,
             // Phase 5: Wave Orchestrator
             commands::create_wave_plan_cmd,
+            commands::get_wave_plans_cmd,
             commands::add_plan_agent_cmd,
             commands::get_plan_agents_cmd,
             commands::update_plan_agent_status_cmd,

@@ -43,6 +43,7 @@ fn apply_migrations(conn: &Connection) -> Result<()> {
         ("018", include_str!("../migrations/018_database_targets.sql")),
         ("019", include_str!("../migrations/019_decision_reviews_unique.sql")),
         ("020", include_str!("../migrations/020_decision_usage_hash.sql")),
+        ("023", include_str!("../migrations/023_memory_fts5.sql")),
     ];
 
     for (id, sql) in late {
