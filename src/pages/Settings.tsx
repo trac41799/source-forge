@@ -3,8 +3,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/components/ThemeProvider";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { FolderPickerInput } from "@/components/ui/path-picker";
 import {
   Globe,
   Zap,
@@ -216,13 +216,18 @@ export default function SettingsPage() {
 
           <div className="space-y-3">
             <div>
-              <label className="text-sm font-medium">Default Project Path</label>
-              <Input
+              <label htmlFor="project-path" className="text-sm font-medium">
+                Default Project Path
+              </label>
+              <FolderPickerInput
+                id="project-path"
                 className="mt-1"
                 placeholder="/path/to/project"
+                title="Select Default Project Folder"
+                browseLabel="Browse Folder"
                 value={localDefaults.projectPath}
-                onChange={(e) =>
-                  setLocalDefaults((d) => ({ ...d, projectPath: e.target.value }))
+                onChange={(projectPath) =>
+                  setLocalDefaults((d) => ({ ...d, projectPath }))
                 }
               />
             </div>

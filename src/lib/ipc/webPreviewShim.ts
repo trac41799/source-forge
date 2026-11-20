@@ -488,6 +488,11 @@ export function installWebPreviewShim(): void {
           coverage_pct: 91.3,
         };
 
+      case "plugin:dialog|open": {
+        const options = args.options as { directory?: boolean } | undefined;
+        return options?.directory ? "D:/projects/demo-app" : "docs/PLAN.md";
+      }
+
       default:
         return [];
     }
