@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+pub mod acp;
 pub mod opencode;
 
 /// Represents a running agent session
@@ -111,10 +112,37 @@ pub struct AdapterRegistry {
 
 impl AdapterRegistry {
     pub fn new() -> Self {
+        Self::with_env(HashMap::new())
+    }
+
+    pub fn with_env(env_vars: HashMap<String, String>) -> Self {
         let mut adapters: HashMap<String, Box<dyn AgentAdapter>> = HashMap::new();
         adapters.insert("mock".to_string(), Box::new(MockAgentAdapter::new()));
         adapters.insert("opencode".to_string(), Box::new(opencode::OpenCodeAdapter::new()));
+
+        let acp_profiles = [
+            ("pi", "npx", vec!["-y", "pi-acp"]),
+            ("opencode-acp", "opencode", vec!["acp"]),
+            ("gemini", "gemini", vec!["--acp"]),
+            ("claude", "npx", vec!["-y", "@agentclientprotocol/claude-agent-acp"]),
+            ("codex", "npx", vec!["-y", "@agentclientprotocol/codex-acp"]),
+        ];
+
+        for (id, binary, args) in acp_profiles {
+            let profile = acp::AcpHarnessProfile {
+                id: id.to_string(),
+                binary: binary.to_string(),
+                args: args.into_iter().map(String::from).collect(),
+                env_vars: env_vars.clone(),
+            };
+            adapters.insert(id.to_string(), Box::new(acp::AcpAgentAdapter::new(profile)));
+        }
+
         Self { adapters }
+    }
+
+    pub fn new_with_db(db: &rusqlite::Connection) -> Self {
+        Self::with_env(load_vault_env(db))
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn AgentAdapter> {
@@ -124,6 +152,53 @@ impl AdapterRegistry {
     pub fn register(&mut self, name: String, adapter: Box<dyn AgentAdapter>) {
         self.adapters.insert(name, adapter);
     }
+}
+
+/// Load decrypted provider secrets from `secrets_vault` (via `crate::assets`)
+/// and known provider environment variables without logging secret values.
+pub fn load_vault_env(db: &rusqlite::Connection) -> HashMap<String, String> {
+    let mut env_vars = HashMap::new();
+
+    for key in [
+        "OPENROUTER_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "OPENAI_API_KEY",
+        "GEMINI_API_KEY",
+        "GOOGLE_API_KEY",
+        "GROQ_API_KEY",
+        "MISTRAL_API_KEY",
+        "XAI_API_KEY",
+        "DEEPSEEK_API_KEY",
+    ] {
+        if let Ok(val) = std::env::var(key) {
+            if !val.trim().is_empty() {
+                env_vars.insert(key.to_string(), val);
+            }
+        }
+    }
+
+    // `list_secrets` returns entries ordered by created_at DESC, so the first
+    // entry per key_name is the newest and overrides process env if non-empty.
+    if let Ok(entries) = crate::assets::list_secrets(db) {
+        let mut seen_keys = std::collections::HashSet::new();
+        for entry in entries {
+            let key_name = entry.key_name.trim().to_string();
+            if key_name.is_empty()
+                || key_name.contains('=')
+                || key_name.contains('\0')
+                || !seen_keys.insert(key_name.clone())
+            {
+                continue;
+            }
+            if let Ok(secret) = crate::assets::get_secret_value(db, &entry.id) {
+                if !secret.is_empty() {
+                    env_vars.insert(key_name, secret);
+                }
+            }
+        }
+    }
+
+    env_vars
 }
 
 #[cfg(test)]
@@ -178,5 +253,29 @@ mod tests {
         let registry = AdapterRegistry::new();
         let adapter = registry.get("unknown");
         assert!(adapter.is_none());
+    }
+
+    #[test]
+    fn test_registry_has_all_acp_harnesses_and_vault_env() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../migrations/001_init.sql")).unwrap();
+        conn.execute_batch(include_str!("../../migrations/002_assets.sql")).unwrap();
+
+        crate::assets::store_secret(&conn, "OPENROUTER_API_KEY", "or-test-key", "global", None, None)
+            .unwrap();
+        crate::assets::store_secret(&conn, "ANTHROPIC_API_KEY", "ant-test-key", "global", None, None)
+            .unwrap();
+
+        let env = load_vault_env(&conn);
+        assert_eq!(env.get("OPENROUTER_API_KEY").map(String::as_str), Some("or-test-key"));
+        assert_eq!(env.get("ANTHROPIC_API_KEY").map(String::as_str), Some("ant-test-key"));
+
+        let registry = AdapterRegistry::with_env(env);
+        for expected in ["mock", "opencode", "pi", "opencode-acp", "gemini", "claude", "codex"] {
+            let adapter = registry
+                .get(expected)
+                .unwrap_or_else(|| panic!("registry missing adapter '{expected}'"));
+            assert_eq!(adapter.name(), expected);
+        }
     }
 }

@@ -237,7 +237,12 @@ export default function BuildApp() {
               value={agentCommand}
               onChange={(e) => setAgentCommand(e.target.value)}
             >
+              <option value="pi">Pi Agent (ACP · Multi-Provider)</option>
               <option value="opencode">OpenCode</option>
+              <option value="opencode-acp">OpenCode (ACP)</option>
+              <option value="claude">Claude Code (ACP)</option>
+              <option value="codex">Codex CLI (ACP)</option>
+              <option value="gemini">Gemini CLI (ACP)</option>
               <option value="mock">Mock (no real agent)</option>
             </select>
           </label>
