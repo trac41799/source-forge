@@ -165,6 +165,8 @@ interface OrchestrationStore {
   wavePlans: WavePlan[];
   planAgents: PlanAgent[];
   corrections: CorrectionDoc[];
+  lastWaveReport: WaveExecutionReport | null;
+  lastVerification: VerificationReport | null;
   // ACB
   acbSignals: ACBSignal[];
   // Playbook
@@ -179,6 +181,7 @@ interface OrchestrationStore {
   buildHandoff: (brief: HandoffEnvelope) => Promise<string>;
   checkAgentVersion: (agentId: string) => Promise<void>;
   // Orchestrator actions
+  getWavePlans: (projectId?: string) => Promise<void>;
   createWavePlan: (projectId: string, slug: string) => Promise<WavePlan>;
   addPlanAgent: (planId: string, agentRef: string, task: string, wave: number, dependsOn?: string, agentId?: string) => Promise<void>;
   getPlanAgents: (planId: string) => Promise<void>;
@@ -217,12 +220,17 @@ interface OrchestrationStore {
   buildFeatureDocPrompt: (docType: string, sessionId: string, featureName: string) => Promise<string>;
 }
 
+const GET_WAVE_PLANS_CMD =
+  (IPC as Record<string, string>).getWavePlans ?? "get_wave_plans_cmd";
+
 export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
   suggestions: [],
   models: [],
   wavePlans: [],
   planAgents: [],
   corrections: [],
+  lastWaveReport: null,
+  lastVerification: null,
   acbSignals: [],
   memoryCandidates: [],
   playbookManifest: null,
@@ -242,6 +250,12 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
   },
   checkAgentVersion: async (agentId) => {
     await invoke("check_agent_version_cmd", { agentId });
+  },
+  getWavePlans: async (projectId) => {
+    const wavePlans = await invoke<WavePlan[]>(GET_WAVE_PLANS_CMD, {
+      projectId: projectId ?? null,
+    });
+    set({ wavePlans: wavePlans ?? [] });
   },
   createWavePlan: async (projectId, slug) => {
     const plan = await invoke<WavePlan>("create_wave_plan_cmd", { projectId, slug });
@@ -266,7 +280,7 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
     return { valid, missing };
   },
   executeWave: async (planId, baseRepo, baseBranch, agentCommand, agentBaseArgs, deadlineSecs?, costCapUsd?) => {
-    return await invoke<WaveExecutionReport>(IPC.executeWave, {
+    const report = await invoke<WaveExecutionReport>(IPC.executeWave, {
       planId,
       baseRepo,
       baseBranch,
@@ -275,15 +289,22 @@ export const useOrchestrationStore = create<OrchestrationStore>((set) => ({
       deadlineSecs: deadlineSecs ?? null,
       costCapUsd: costCapUsd ?? null,
     });
+    set({ lastWaveReport: report });
+    return report;
   },
   finalizeWave: async (report, projectPath) => {
     // Verification gate (SPEC-001 §5 DG-4): the UI never finalizes on handoff
     // file existence alone — every finalize runs deployment verification and
     // returns both the wave report and the verification report.
-    return await invoke<VerifyAndFinalizeResult>(IPC.verifyAndFinalizeWave, {
+    const result = await invoke<VerifyAndFinalizeResult>(IPC.verifyAndFinalizeWave, {
       report,
       projectPath,
     });
+    set({
+      lastWaveReport: result.wave,
+      lastVerification: result.verification,
+    });
+    return result;
   },
   createWorktree: async (repoPath, branch, worktreePath, baseBranch) => {
     return await invoke<string>("create_worktree_cmd", { repoPath, branch, worktreePath, baseBranch });
