@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useIntegrationStore } from "@/stores/integrationStore";
 import { useBackwardChannelStore } from "@/stores/backwardChannelStore";
+import { useProjectStore } from "@/stores/projectStore";
 import type { ChatPlatformConfig } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -32,6 +34,7 @@ import {
   Flag,
   Check,
   Eye,
+  FolderOpen,
 } from "lucide-react";
 
 type Tab = "supabase" | "github" | "lockdown" | "migration" | "chat";
@@ -140,8 +143,9 @@ function Badge({
 }
 
 function Integrations() {
+  const activeProjectPath = useProjectStore((s) => s.currentProject?.path) || "";
   const [activeTab, setActiveTab] = useState<Tab>("supabase");
-  const [projectPath, setProjectPath] = useState("/Users/tracnguyendang/Projects");
+  const [projectPath, setProjectPath] = useState(activeProjectPath);
   const [supabaseUrl, setSupabaseUrl] = useState("");
   const [anonKey, setAnonKey] = useState("");
   const [serviceKey, setServiceKey] = useState("");
@@ -155,6 +159,23 @@ function Integrations() {
   const [lastPrUrl, setLastPrUrl] = useState<string | null>(null);
 
   const store = useIntegrationStore();
+
+  useEffect(() => {
+    if (activeProjectPath) {
+      setProjectPath((prev) => prev || activeProjectPath);
+    }
+  }, [activeProjectPath]);
+
+  const handleBrowseProject = async () => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string" && selected) {
+        setProjectPath(selected);
+      }
+    } catch {
+      // Ignore dialog cancellation / web-preview errors
+    }
+  };
 
   useEffect(() => {
     if (activeTab === "supabase") {
@@ -374,6 +395,15 @@ function Integrations() {
                 placeholder="/path/to/project"
                 className="flex-1 font-mono text-sm"
               />
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                onClick={handleBrowseProject}
+              >
+                <FolderOpen className="size-4 mr-1" />
+                Browse Folder
+              </Button>
               <Button
                 variant="outline"
                 size="sm"
@@ -1095,6 +1125,21 @@ function ChatTab() {
     store.checkQueueHealth();
   };
 
+  const handleBrowseConfig = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "YAML", extensions: ["yaml", "yml", "json"] }],
+      });
+      if (typeof selected === "string" && selected) {
+        setConfigPath(selected);
+      }
+    } catch {
+      // Ignore dialog cancellation / web-preview errors
+    }
+  };
+
   const getPlatformLabel = (key: string) => {
     const platform = CHAT_PLATFORMS.find((p) => p.key === key);
     return platform?.label || key;
@@ -1161,12 +1206,23 @@ function ChatTab() {
           </div>
           <div>
             <label className="mb-1 block text-xs text-muted-foreground">Config Path</label>
-            <Input
-              value={configPath}
-              onChange={(e) => setConfigPath(e.target.value)}
-              placeholder="/path/to/daemon/config.yaml"
-              className="font-mono text-sm"
-            />
+            <div className="flex gap-2">
+              <Input
+                value={configPath}
+                onChange={(e) => setConfigPath(e.target.value)}
+                placeholder="/path/to/daemon/config.yaml"
+                className="flex-1 font-mono text-sm"
+              />
+              <Button
+                variant="outline"
+                size="sm"
+                type="button"
+                onClick={handleBrowseConfig}
+              >
+                <FolderOpen className="size-4 mr-1" />
+                Browse Config
+              </Button>
+            </div>
           </div>
           {store.daemonStatus.error && (
             <div className="rounded-md border border-red-500/20 bg-red-500/5 p-2">
