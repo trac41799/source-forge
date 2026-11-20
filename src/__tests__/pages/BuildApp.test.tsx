@@ -90,4 +90,39 @@ describe("BuildApp page", () => {
       })
     );
   });
+
+  it("renders all ACP harness options in the Agent selector and submits selected harness", async () => {
+    mockInvoke.mockResolvedValueOnce(REPORT);
+    render(<BuildApp />);
+
+    const agentSelect = screen.getByLabelText("Agent") as HTMLSelectElement;
+    const optionValues = Array.from(agentSelect.options).map((o) => o.value);
+    expect(optionValues).toEqual([
+      "pi",
+      "opencode",
+      "opencode-acp",
+      "claude",
+      "codex",
+      "gemini",
+      "mock",
+    ]);
+
+    await userEvent.selectOptions(agentSelect, "pi");
+    await userEvent.type(
+      screen.getByPlaceholderText("docs/PLAN.md"),
+      "docs/PLAN.md"
+    );
+    await userEvent.type(
+      screen.getByPlaceholderText("/path/to/project"),
+      "/tmp/app"
+    );
+    await userEvent.click(screen.getByRole("button", { name: /build app/i }));
+
+    await screen.findByText("succeeded");
+    expect(mockInvoke).toHaveBeenCalledWith("build_app_cmd", {
+      options: expect.objectContaining({
+        agent_command: "pi",
+      }),
+    });
+  });
 });
