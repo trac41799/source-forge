@@ -18,7 +18,7 @@ function renderSidebar(initialEntries = ["/"]) {
 describe("Sidebar keyboard shortcuts", () => {
   beforeEach(() => {
     useSettingsStore.setState({
-      sidebarCollapsed: { work: false, review: true, configure: true, automate: true, system: true },
+      sidebarCollapsed: { workspace: false, knowledge: true, review: true, settings: true },
     });
     delete (window as any).location;
     (window as any).location = { href: "" };
@@ -44,18 +44,18 @@ describe("Sidebar keyboard shortcuts", () => {
 
   it("Enter key toggles a collapsed group", async () => {
     renderSidebar();
-    const reviewHeader = screen.getByRole("button", { name: /REVIEW/ });
+    const reviewHeader = screen.getByRole("button", { name: /Review & Outcomes/ });
     reviewHeader.focus();
     expect(reviewHeader).toHaveAttribute("aria-expanded", "false");
     await userEvent.keyboard("{Enter}");
     expect(reviewHeader).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("supports Tab key navigation: Runner first, then WORK group", async () => {
+  it("supports Tab key navigation: Runner first, then Workspace group", async () => {
     renderSidebar();
     await userEvent.tab();
     expect(screen.getByRole("link", { name: /Runner/ })).toHaveFocus();
     await userEvent.tab();
-    expect(screen.getByRole("button", { name: /WORK/ })).toHaveFocus();
+    expect(screen.getByRole("button", { name: /Workspace/ })).toHaveFocus();
   });
 });

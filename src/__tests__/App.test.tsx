@@ -12,14 +12,16 @@ describe("App", () => {
     expect(screen.getByText("SourceForge")).toBeInTheDocument();
   });
 
-  it("renders Sidebar with 5 collapsible groups", () => {
+  it("renders Sidebar with 4 collapsible groups", () => {
     render(
       <MemoryRouter initialEntries={["/runner"]}>
         <App />
       </MemoryRouter>
     );
-    const groups = screen.getAllByRole("button", { name: /(WORK|REVIEW|CONFIGURE|AUTOMATE|SYSTEM)/ });
-    expect(groups).toHaveLength(5);
+    const groups = screen.getAllByRole("button", {
+      name: /(Workspace|Knowledge & Assets|Review & Outcomes|Settings)/,
+    });
+    expect(groups).toHaveLength(4);
   });
 
   it("redirects / to /runner", () => {
