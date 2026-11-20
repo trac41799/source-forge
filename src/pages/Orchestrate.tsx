@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useOrchestrationStore, type PlanAgent, type CorrectionDoc } from "@/stores/orchestrationStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,15 +47,23 @@ export default function Orchestrate() {
   const location = useLocation();
   const navigate = useNavigate();
   const store = useOrchestrationStore();
+  const currentProject = useProjectStore((s) => s.currentProject);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [newSlug, setNewSlug] = useState("");
-  const [newProjectId, setNewProjectId] = useState("acc-main");
+  const [newProjectId, setNewProjectId] = useState(() => currentProject?.id || "acc-main");
+  const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [newAgent, setNewAgent] = useState({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
   const [hasLoaded, setHasLoaded] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isFinalizing, setIsFinalizing] = useState(false);
   const [selectedHarness, setSelectedHarness] = useState("opencode");
   const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectIdTouched) {
+      setNewProjectId(currentProject?.id || "acc-main");
+    }
+  }, [currentProject?.id, projectIdTouched]);
 
   const activeTab: TabId = location.pathname.includes("/handoffs")
     ? "handoffs"
@@ -209,10 +218,15 @@ export default function Orchestrate() {
             />
           </div>
           <div className="w-40">
-            <label className="block text-xs text-gray-400 mb-1">Project ID</label>
+            <label htmlFor="wave-plan-project-id" className="block text-xs text-gray-400 mb-1">Project ID</label>
             <Input
+              id="wave-plan-project-id"
+              aria-label="Project ID"
               value={newProjectId}
-              onChange={(e) => setNewProjectId(e.target.value)}
+              onChange={(e) => {
+                setProjectIdTouched(true);
+                setNewProjectId(e.target.value);
+              }}
               className="bg-[#0d1117] border-[#30363d] text-gray-300"
             />
           </div>
@@ -370,13 +384,27 @@ export default function Orchestrate() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Agent ID (optional)</label>
-                <Input
+                <label htmlFor="plan-agent-id" className="block text-xs text-gray-400 mb-1">Agent ID (optional)</label>
+                <select
+                  id="plan-agent-id"
+                  aria-label="Agent ID"
                   value={newAgent.agentId}
                   onChange={(e) => setNewAgent((p) => ({ ...p, agentId: e.target.value }))}
-                  placeholder="e.g., claude-code"
-                  className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                />
+                  className="w-full h-9 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-sm text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+                >
+                  <option value="">Default (Wave Harness)</option>
+                  <option value="pi">Pi Agent (ACP)</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="opencode-acp">OpenCode (ACP)</option>
+                  <option value="claude">Claude Code</option>
+                  <option value="codex">Codex CLI</option>
+                  <option value="gemini">Gemini CLI</option>
+                  <option value="aider">Aider</option>
+                  <option value="goose">Goose</option>
+                  <option value="cline">Cline CLI</option>
+                  <option value="cursor">Cursor</option>
+                  <option value="qwen-code">Qwen Code</option>
+                </select>
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Task</label>
@@ -389,21 +417,34 @@ export default function Orchestrate() {
               </div>
               <div className="flex gap-2">
                 <div className="flex-1">
-                  <label className="block text-xs text-gray-400 mb-1">Wave #</label>
+                  <label htmlFor="plan-agent-wave" className="block text-xs text-gray-400 mb-1">Wave #</label>
                   <Input
+                    id="plan-agent-wave"
+                    aria-label="Wave #"
+                    type="number"
+                    min={1}
+                    max={20}
                     value={newAgent.wave}
                     onChange={(e) => setNewAgent((p) => ({ ...p, wave: e.target.value }))}
                     className="bg-[#0d1117] border-[#30363d] text-gray-300"
                   />
                 </div>
                 <div className="flex-1">
-                  <label className="block text-xs text-gray-400 mb-1">Depends On</label>
-                  <Input
+                  <label htmlFor="plan-agent-depends-on" className="block text-xs text-gray-400 mb-1">Depends On</label>
+                  <select
+                    id="plan-agent-depends-on"
+                    aria-label="Depends On"
                     value={newAgent.dependsOn}
                     onChange={(e) => setNewAgent((p) => ({ ...p, dependsOn: e.target.value }))}
-                    placeholder="agent ref"
-                    className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                  />
+                    className="w-full h-9 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-sm text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+                  >
+                    <option value="">None (no dependency)</option>
+                    {store.planAgents.map((a) => (
+                      <option key={a.id} value={a.agent_ref}>
+                        {a.agent_ref} (Wave {a.wave})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>
