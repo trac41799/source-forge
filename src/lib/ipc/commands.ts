@@ -16,6 +16,12 @@ export const IPC = {
   getPreferences: "get_preferences_cmd",
   setPreferences: "set_preferences_cmd",
 
+  // PTY / Agent Runner
+  spawnAgent: "spawn_agent",
+  killAgent: "kill_agent",
+  writeToAgent: "write_to_agent",
+  resizePty: "resize_pty_cmd",
+
   // Knowledge / compounder
   runCompounder: "run_compounder_cmd",
   getPreflightWarnings: "get_preflight_warnings_cmd",

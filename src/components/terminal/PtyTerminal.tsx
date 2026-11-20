@@ -1,8 +1,19 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
+import { IPC } from '../../lib/ipc/commands'
+import { useAgentStore } from '../../stores/agentStore'
 import { createPipeline } from '../../lib/pty/pipeline'
 import type { AgentStatus } from '../../lib/types'
+
+interface AgentOutputEventPayload {
+  agent_id: string
+  session_id: string
+  line: string
+  timestamp: string
+}
 
 interface PtyTerminalProps {
   agentId: string
@@ -80,13 +91,45 @@ const PtyTerminal = forwardRef<PtyTerminalHandle, PtyTerminalProps>(
 
       const handleResize = () => {
         fitAddon.fit()
+        if (terminal.cols > 0 && terminal.rows > 0) {
+          invoke(IPC.resizePty, {
+            agentId,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          }).catch(() => {})
+        }
       }
+
+      const dataDisposable = terminal.onData((data) => {
+        useAgentStore.getState().writeToAgent(agentId, data).catch(() => {})
+      })
+
+      let disposed = false
+      let unlistenOutput: UnlistenFn | null = null
+      listen<AgentOutputEventPayload>('agent-output', (event) => {
+        if (event.payload.agent_id !== agentId) return
+        terminalRef.current?.writeln(event.payload.line)
+        pipelineRef.current?.feed(event.payload.line + '\n')
+      })
+        .then((fn) => {
+          if (disposed) {
+            fn()
+          } else {
+            unlistenOutput = fn
+          }
+        })
+        .catch(() => {})
 
       const observer = new ResizeObserver(handleResize)
       observer.observe(containerRef.current)
       resizeObserverRef.current = observer
 
       return () => {
+        disposed = true
+        if (unlistenOutput) {
+          unlistenOutput()
+        }
+        dataDisposable.dispose()
         observer.disconnect()
         pipelineRef.current?.destroy()
         terminal.dispose()

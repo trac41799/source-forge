@@ -21,6 +21,7 @@ interface SettingsState {
     modelId: string;
   };
   stackPreferences: StackPreferences | null;
+  experimentalFeatures: boolean;
   onboardingCompleted: boolean;
   forceShowOnboarding: boolean;
   sidebarCollapsed: Record<string, boolean>;
@@ -45,14 +46,14 @@ const DEFAULT_SETTINGS = {
     agentId: "opencode",
     modelId: "",
   },
+  experimentalFeatures: false,
   onboardingCompleted: false,
   forceShowOnboarding: false,
   sidebarCollapsed: {
-    work: false,
+    workspace: false,
+    knowledge: true,
     review: true,
-    configure: true,
-    automate: true,
-    system: true,
+    settings: true,
   },
 };
 
@@ -68,6 +69,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
         set({
           theme: parsed.theme || DEFAULT_SETTINGS.theme,
           defaults: { ...DEFAULT_SETTINGS.defaults, ...parsed.defaults },
+          experimentalFeatures: parsed.experimentalFeatures ?? false,
           onboardingCompleted: parsed.onboardingCompleted ?? false,
           sidebarCollapsed: { ...DEFAULT_SETTINGS.sidebarCollapsed, ...parsed.sidebarCollapsed },
         });
@@ -102,13 +104,15 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
     }
   },
 
-  saveSettings: (partial) => {    set(partial);
+  saveSettings: (partial) => {
+    set(partial);
     const current = get();
     localStorage.setItem(
       STORAGE_KEY,
       JSON.stringify({
         theme: current.theme,
         defaults: current.defaults,
+        experimentalFeatures: current.experimentalFeatures,
         onboardingCompleted: current.onboardingCompleted,
         sidebarCollapsed: current.sidebarCollapsed,
       })
@@ -123,6 +127,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       JSON.stringify({
         theme: current.theme,
         defaults: current.defaults,
+        experimentalFeatures: current.experimentalFeatures,
         onboardingCompleted: true,
         sidebarCollapsed: current.sidebarCollapsed,
       })
@@ -137,6 +142,7 @@ export const useSettingsStore = create<SettingsState>((set, get) => ({
       JSON.stringify({
         theme: current.theme,
         defaults: current.defaults,
+        experimentalFeatures: current.experimentalFeatures,
         onboardingCompleted: false,
         sidebarCollapsed: current.sidebarCollapsed,
       })

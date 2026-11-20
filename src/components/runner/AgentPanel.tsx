@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { useAgentStore } from '../../stores/agentStore'
+import { useProjectStore } from '../../stores/projectStore'
 import type { AgentConfig } from '../../lib/types'
 import { AgentNotInstalledError } from '../../lib/types'
 import PtyTerminal from '../terminal/PtyTerminal'
@@ -44,7 +45,8 @@ export default function AgentPanel({ config, isOrchestrator = false, waveEligibl
   const handleSpawn = async () => {
     setErrorMessage(null)
     try {
-      await spawnAgent(config, '/projects/current')
+      const projectPath = useProjectStore.getState().currentProject?.path || '.'
+      await spawnAgent(config, projectPath)
     } catch (e) {
       if (e instanceof AgentNotInstalledError) {
         setErrorMessage(e.message)
