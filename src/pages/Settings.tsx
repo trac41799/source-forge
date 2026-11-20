@@ -359,6 +359,30 @@ export default function SettingsPage() {
           </div>
         </Card>
 
+        {/* Experimental Features */}
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-5" />
+            <h2 className="text-lg font-semibold">Experimental Features</h2>
+          </div>
+          <Separator />
+          <label className="flex items-center justify-between gap-4 cursor-pointer">
+            <div>
+              <p className="text-sm font-medium">Enable Experimental Features</p>
+              <p className="text-xs text-muted-foreground">
+                Reveal speculative Clifford-Bagua hexagram explorer and Leiden community detection panels.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              aria-label="Experimental Features"
+              checked={store.experimentalFeatures}
+              onChange={(e) => store.saveSettings({ experimentalFeatures: e.target.checked })}
+              className="size-4 accent-indigo-500 rounded"
+            />
+          </label>
+        </Card>
+
         {/* Onboarding */}
         <Card className="p-6 space-y-4">
           <div className="flex items-center gap-2">

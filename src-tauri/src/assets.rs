@@ -537,6 +537,29 @@ pub fn get_secret_value(db: &Connection, id: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Load decrypted/stored Vault secrets eligible for `agent_id` (`scope = 'global'`
+/// or `agent_id = ?1`), ordering agent-scoped keys after global keys so agent-specific
+/// overrides take precedence without logging secret values.
+pub fn load_vault_env_vars(db: &Connection, agent_id: &str) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    let Ok(mut stmt) = db.prepare(
+        "SELECT key_name, encrypted_value FROM secrets_vault \
+         WHERE scope = 'global' OR agent_id = ?1 \
+         ORDER BY CASE WHEN agent_id = ?1 THEN 1 ELSE 0 END ASC, created_at ASC",
+    ) else {
+        return env;
+    };
+
+    if let Ok(rows) = stmt.query_map(rusqlite::params![agent_id], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        for row in rows.flatten() {
+            env.insert(row.0, row.1);
+        }
+    }
+    env
+}
+
 // ---------------------------------------------------------------------------
 // Plugin Manager — VS Code extensions
 // ---------------------------------------------------------------------------

@@ -39,6 +39,7 @@ import {
 } from "@/stores/knowledgeStore";
 import { useProjectStore } from "@/stores/projectStore";
 import { useCodebaseStore } from "@/stores/codebaseStore";
+import { useSettingsStore } from "@/stores/settingsStore";
 import type { KnowledgeItem, KnowledgeRelation, SubgraphResult } from "@/lib/types";
 import MemoryPanel from "@/components/memory/MemoryPanel";
 
@@ -1078,6 +1079,7 @@ function KgExplorerPanel({
   items: KnowledgeItem[];
 }) {
   const store = useKnowledgeStore();
+  const experimentalFeatures = useSettingsStore((s) => s.experimentalFeatures);
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<{ destroy: () => void } | null>(null);
   const [searchId, setSearchId] = useState("");
@@ -1159,7 +1161,7 @@ function KgExplorerPanel({
         const hex = edge.data("hexagramTag");
         const cycle = edge.data("wuxingCycle");
         const confidence = edge.data("baguaConfidence");
-        if (tag) {
+        if (experimentalFeatures && tag) {
           const info = getTrigramInfo(tag);
           const parts: string[] = [];
           if (info) parts.push(`${info.symbol} ${info.name} — ${info.meaning}`);
@@ -1273,7 +1275,7 @@ function KgExplorerPanel({
             )}
           </div>
 
-          {nodeCount > 0 && (
+          {experimentalFeatures && nodeCount > 0 && (
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[10px] text-muted-foreground mr-1">Trigram filter:</span>
               {Object.entries(BAGUA_COLORS).map(([tag, color]) => {
@@ -1353,7 +1355,7 @@ function KgExplorerPanel({
             </div>
           )}
 
-          {nodeCount > 0 && (
+          {experimentalFeatures && nodeCount > 0 && (
             <Card className="p-0 overflow-hidden border-white/10">
               <button
                 onClick={() => setLegendOpen(!legendOpen)}
@@ -1533,15 +1535,17 @@ function KgExplorerPanel({
             >
               <GitCompare className="w-3.5 h-3.5 mr-1" /> Check
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                store.kgRunCommunityDetection();
-              }}
-            >
-              <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
-            </Button>
+            {experimentalFeatures && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  store.kgRunCommunityDetection();
+                }}
+              >
+                <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
+              </Button>
+            )}
           </div>
           <ScrollArea className="flex-1">
             <div className="space-y-2 pr-2">

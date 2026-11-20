@@ -25,19 +25,22 @@ function renderSidebar(initialEntries = ["/"]) {
 describe("Sidebar", () => {
   beforeEach(() => {
     useSettingsStore.setState({
-      sidebarCollapsed: { work: false, review: true, configure: true, automate: true, system: true },
+      experimentalFeatures: false,
+      sidebarCollapsed: { workspace: false, knowledge: true, review: true, settings: true },
     });
   });
 
-  it("renders groups in frequency order: WORK, REVIEW, CONFIGURE, AUTOMATE, SYSTEM", () => {
+  it("renders_four_core_groups_and_gates_experimental", () => {
     renderSidebar();
-    const groups = screen.getAllByRole("button", { name: /^(WORK|REVIEW|CONFIGURE|AUTOMATE|SYSTEM)$/ });
-    expect(groups).toHaveLength(5);
-    expect(groups[0]).toHaveTextContent("WORK");
-    expect(groups[1]).toHaveTextContent("REVIEW");
-    expect(groups[2]).toHaveTextContent("CONFIGURE");
-    expect(groups[3]).toHaveTextContent("AUTOMATE");
-    expect(groups[4]).toHaveTextContent("SYSTEM");
+    const groups = screen.getAllByRole("button", {
+      name: /^(Workspace|Knowledge & Assets|Review & Outcomes|Settings)/,
+    });
+    expect(groups).toHaveLength(4);
+    expect(groups[0]).toHaveTextContent("Workspace");
+    expect(groups[1]).toHaveTextContent("Knowledge & Assets");
+    expect(groups[2]).toHaveTextContent("Review & Outcomes");
+    expect(groups[3]).toHaveTextContent("Settings");
+    expect(useSettingsStore.getState().experimentalFeatures).toBe(false);
   });
 
   it("renders Runner as a persistent top item outside any group", () => {
@@ -47,28 +50,25 @@ describe("Sidebar", () => {
     expect(runner.closest("[data-collapsible]")).toBeNull();
   });
 
-  it("expands WORK group by default", () => {
+  it("expands Workspace group by default", () => {
     renderSidebar();
     expect(screen.getByRole("link", { name: /Orchestrate/ })).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: /Knowledge/ })).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Build App/ })).toBeInTheDocument();
   });
 
-  it("collapses REVIEW, CONFIGURE, AUTOMATE, SYSTEM groups by default", () => {
+  it("collapses Knowledge & Assets, Review & Outcomes, Settings groups by default", () => {
     renderSidebar();
-    // Groups are collapsed via CSS classes; verify the collapsed wrapper classes
-    const reviewBtn = screen.getByRole("button", { name: /REVIEW/ });
+    const knowledgeBtn = screen.getByRole("button", { name: /Knowledge & Assets/ });
+    expect(knowledgeBtn).toHaveAttribute("aria-expanded", "false");
+    const reviewBtn = screen.getByRole("button", { name: /Review & Outcomes/ });
     expect(reviewBtn).toHaveAttribute("aria-expanded", "false");
-    const configureBtn = screen.getByRole("button", { name: /CONFIGURE/ });
-    expect(configureBtn).toHaveAttribute("aria-expanded", "false");
-    const automateBtn = screen.getByRole("button", { name: /AUTOMATE/ });
-    expect(automateBtn).toHaveAttribute("aria-expanded", "false");
-    const systemBtn = screen.getByRole("button", { name: /SYSTEM/ });
-    expect(systemBtn).toHaveAttribute("aria-expanded", "false");
+    const settingsBtn = screen.getByRole("button", { name: /^Settings$/ });
+    expect(settingsBtn).toHaveAttribute("aria-expanded", "false");
   });
 
   it("expands a collapsed group on header click", async () => {
     renderSidebar();
-    const reviewHeader = screen.getByRole("button", { name: /REVIEW/ });
+    const reviewHeader = screen.getByRole("button", { name: /Review & Outcomes/ });
     expect(reviewHeader).toHaveAttribute("aria-expanded", "false");
     await userEvent.click(reviewHeader);
     expect(reviewHeader).toHaveAttribute("aria-expanded", "true");
@@ -76,38 +76,38 @@ describe("Sidebar", () => {
 
   it("collapses an expanded group on header click", async () => {
     renderSidebar();
-    const workHeader = screen.getByRole("button", { name: /WORK/ });
-    expect(workHeader).toHaveAttribute("aria-expanded", "true");
-    await userEvent.click(workHeader);
-    expect(workHeader).toHaveAttribute("aria-expanded", "false");
+    const workspaceHeader = screen.getByRole("button", { name: /Workspace/ });
+    expect(workspaceHeader).toHaveAttribute("aria-expanded", "true");
+    await userEvent.click(workspaceHeader);
+    expect(workspaceHeader).toHaveAttribute("aria-expanded", "false");
   });
 
   it("behaves as accordion — expanding one group collapses others", async () => {
     useSettingsStore.setState({
-      sidebarCollapsed: { work: false, review: true, configure: true, automate: true, system: true },
+      sidebarCollapsed: { workspace: false, knowledge: true, review: true, settings: true },
     });
     renderSidebar();
-    await userEvent.click(screen.getByRole("button", { name: /REVIEW/ }));
-    await userEvent.click(screen.getByRole("button", { name: /CONFIGURE/ }));
-    const configureBtn = screen.getByRole("button", { name: /CONFIGURE/ });
-    expect(configureBtn).toHaveAttribute("aria-expanded", "true");
-    const reviewBtn = screen.getByRole("button", { name: /REVIEW/ });
+    await userEvent.click(screen.getByRole("button", { name: /Review & Outcomes/ }));
+    await userEvent.click(screen.getByRole("button", { name: /Knowledge & Assets/ }));
+    const knowledgeBtn = screen.getByRole("button", { name: /Knowledge & Assets/ });
+    expect(knowledgeBtn).toHaveAttribute("aria-expanded", "true");
+    const reviewBtn = screen.getByRole("button", { name: /Review & Outcomes/ });
     expect(reviewBtn).toHaveAttribute("aria-expanded", "false");
   });
 
   it("auto-expands the group containing the active route", () => {
     renderSidebar(["/outcomes"]);
-    const reviewBtn = screen.getByRole("button", { name: /REVIEW/ });
+    const reviewBtn = screen.getByRole("button", { name: /Review & Outcomes/ });
     expect(reviewBtn).toHaveAttribute("aria-expanded", "true");
   });
 
-  it("shows new-items badge on collapsed WORK group header", () => {
+  it("shows new-items badge on collapsed Knowledge & Assets group header", () => {
     useSettingsStore.setState({
-      sidebarCollapsed: { work: true, review: true, configure: true, automate: true, system: true },
+      sidebarCollapsed: { workspace: true, knowledge: true, review: true, settings: true },
     });
     renderSidebar();
-    const workHeader = screen.getByRole("button", { name: /WORK/ });
-    expect(workHeader).toHaveTextContent("3");
+    const knowledgeHeader = screen.getByRole("button", { name: /Knowledge & Assets/ });
+    expect(knowledgeHeader).toHaveTextContent("3");
   });
 
   it("handles Ctrl+1 keyboard shortcut", async () => {

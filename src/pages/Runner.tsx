@@ -1,7 +1,10 @@
 import { useState, useMemo, useEffect } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { useAgentStore } from '../stores/agentStore'
 import { usePresetStore } from '../stores/presetStore'
 import { useProjectStore } from '../stores/projectStore'
+import { useAssetStore } from '../stores/assetStore'
+import { useCodebaseStore } from '../stores/codebaseStore'
 import { useControlStore, type ControlState } from '../stores/controlStore'
 import AgentGrid from '../components/runner/AgentGrid'
 import { OrchestratorToggle } from '../components/runner/OrchestratorToggle'
@@ -9,52 +12,13 @@ import { AGENT_CONFIGS } from '../lib/agents/configs'
 import type { AgentConfig } from '../lib/types'
 import { AlertTriangle, CheckCircle2, Pause, Play, Wand2, XCircle, Sliders } from 'lucide-react'
 
-const AVAILABLE_AGENTS: AgentConfig[] = [
-  { 
-    id: 'claude-code', 
-    label: 'Claude Code', 
-    spawnCmd: 'claude', 
-    defaultArgs: [], 
-    memoryFile: '', 
-    globalConfigPath: '', 
-    mcpConfigFile: '', 
-    mcpConfigKey: '', 
-    tier: 1,
-    supportsSubagents: false,
-    waveEligible: false,
-  },
-  { 
-    id: 'opencode', 
-    label: 'OpenCode', 
-    spawnCmd: 'opencode', 
-    defaultArgs: [], 
-    memoryFile: '', 
-    globalConfigPath: '', 
-    mcpConfigFile: '', 
-    mcpConfigKey: '', 
-    tier: 1,
-    supportsSubagents: false,
-    waveEligible: false,
-  },
-  { 
-    id: 'aider', 
-    label: 'Aider', 
-    spawnCmd: 'aider', 
-    defaultArgs: [], 
-    memoryFile: '', 
-    globalConfigPath: '', 
-    mcpConfigFile: '', 
-    mcpConfigKey: '', 
-    tier: 1,
-    supportsSubagents: false,
-    waveEligible: false,
-  },
-]
-
 export default function Runner() {
+  const navigate = useNavigate()
   const { agents, spawnAgent } = useAgentStore()
-  const { presets, executePreset } = usePresetStore()
+  const { presets, addPreset, executePreset } = usePresetStore()
   const { currentProject, switchProject, recentPaths } = useProjectStore()
+  const generateProfile = useAssetStore((s) => s.generateProfile)
+  const buildRepoMap = useCodebaseStore((s) => s.buildRepoMap)
   const controlSessions = useControlStore((s) => s.sessions)
   const controlConflicts = useControlStore((s) => s.conflicts)
   const controlModeActive = useControlStore((s) => s.controlModeActive)
@@ -68,6 +32,9 @@ export default function Runner() {
   const [showAgentDropdown, setShowAgentDropdown] = useState(false)
   const [orchestratorMode, setOrchestratorMode] = useState(false)
   const [orchestratorAgent, setOrchestratorAgent] = useState<string | null>(null)
+  const [showNewPreset, setShowNewPreset] = useState(false)
+  const [newPresetLabel, setNewPresetLabel] = useState('')
+  const [newPresetCommand, setNewPresetCommand] = useState('')
 
   const controlThreadId = currentProject?.id || currentProject?.path || 'default-thread'
 
@@ -109,12 +76,42 @@ export default function Runner() {
   
   const handleSpawnAgent = async (agent: AgentConfig) => {
     try {
-      const projectPath = currentProject?.path || '/projects/current'
+      const projectPath = currentProject?.path || '.'
       await spawnAgent(agent, projectPath)
       setShowAgentDropdown(false)
     } catch (e) {
       console.error('Failed to spawn agent:', e)
     }
+  }
+
+  const handleLoadProfile = async () => {
+    const projectPath = currentProject?.path || '.'
+    await generateProfile(projectPath)
+  }
+
+  const handleCreatePreset = () => {
+    const label = newPresetLabel.trim()
+    const command = newPresetCommand.trim()
+    if (!label || !command) return
+    addPreset({
+      label,
+      agent_id: '',
+      command,
+      tags: [],
+      sort_order: presets.length,
+    })
+    setNewPresetLabel('')
+    setNewPresetCommand('')
+    setShowNewPreset(false)
+  }
+
+  const handleAnalyze = async () => {
+    const projectPath = currentProject?.path || '.'
+    await buildRepoMap(currentProject?.id || 'default', projectPath)
+  }
+
+  const handleDocs = () => {
+    navigate('/knowledge')
   }
   
   const handlePresetClick = (presetId: string) => {
@@ -169,7 +166,10 @@ export default function Runner() {
             <Sliders className="size-3.5" />
             {controlModeActive ? 'Control Mode: On' : 'Control Mode'}
           </button>
-          <button className="gradient-primary px-3 py-1.5 text-xs text-white rounded-lg shadow-glow-sm hover:shadow-glow-lg hover:-translate-y-px active:scale-[0.98] transition-all duration-200">
+          <button
+            onClick={() => void handleLoadProfile()}
+            className="gradient-primary px-3 py-1.5 text-xs text-white rounded-lg shadow-glow-sm hover:shadow-glow-lg hover:-translate-y-px active:scale-[0.98] transition-all duration-200"
+          >
             Load Profile
           </button>
         </div>
@@ -209,14 +209,15 @@ export default function Runner() {
                 + Add Agent
               </button>
               {showAgentDropdown && (
-                <div className="absolute right-0 top-full mt-1 w-40 glass-card shadow-lg z-10 p-1">
-                  {AVAILABLE_AGENTS.map((agent) => (
+                <div className="absolute right-0 top-full mt-1 w-48 glass-card shadow-lg z-10 p-1 max-h-72 overflow-y-auto">
+                  {AGENT_CONFIGS.map((agent) => (
                     <button
                       key={agent.id}
                       onClick={() => handleSpawnAgent(agent)}
-                      className="w-full px-3 py-2 text-left text-sm text-foreground glass-hover rounded-md transition-colors first:rounded-t-md last:rounded-b-md"
+                      className="w-full px-3 py-2 text-left text-sm text-foreground glass-hover rounded-md transition-colors first:rounded-t-md last:rounded-b-md flex items-center justify-between gap-2"
                     >
-                      {agent.label}
+                      <span>{agent.label}</span>
+                      <span className="text-[10px] text-muted-foreground">T{agent.tier}</span>
                     </button>
                   ))}
                 </div>
@@ -357,10 +358,37 @@ export default function Runner() {
                 {preset.label}
               </button>
             ))}
-            <button className="px-3 py-1.5 text-sm bg-glass-10 text-muted-foreground border border-dashed border-glass-border rounded-lg glass-hover">
+            <button
+              onClick={() => setShowNewPreset((v) => !v)}
+              className="px-3 py-1.5 text-sm bg-glass-10 text-muted-foreground border border-dashed border-glass-border rounded-lg glass-hover"
+            >
               + New
             </button>
           </div>
+          {showNewPreset && (
+            <div className="mt-3 flex flex-wrap items-center gap-2 p-3 rounded-lg bg-glass-10 border border-glass-border">
+              <input
+                type="text"
+                placeholder="Preset label"
+                value={newPresetLabel}
+                onChange={(e) => setNewPresetLabel(e.target.value)}
+                className="px-2.5 py-1.5 text-xs bg-glass-20 border border-glass-border rounded-md text-foreground outline-none"
+              />
+              <input
+                type="text"
+                placeholder="Command"
+                value={newPresetCommand}
+                onChange={(e) => setNewPresetCommand(e.target.value)}
+                className="px-2.5 py-1.5 text-xs bg-glass-20 border border-glass-border rounded-md text-foreground outline-none flex-1 min-w-[160px]"
+              />
+              <button
+                onClick={handleCreatePreset}
+                className="gradient-primary px-3 py-1.5 text-xs text-white rounded-md"
+              >
+                Save Preset
+              </button>
+            </div>
+          )}
         </section>
       </div>
       
@@ -372,10 +400,16 @@ export default function Runner() {
           <span>{totalFilesChanged} files changed</span>
         </div>
         <div className="flex items-center gap-2">
-          <button className="px-2 py-1 text-xs text-muted-foreground glass-hover rounded-md">
+          <button
+            onClick={() => void handleAnalyze()}
+            className="px-2 py-1 text-xs text-muted-foreground glass-hover rounded-md"
+          >
             Analyze
           </button>
-          <button className="px-2 py-1 text-xs text-muted-foreground glass-hover rounded-md">
+          <button
+            onClick={handleDocs}
+            className="px-2 py-1 text-xs text-muted-foreground glass-hover rounded-md"
+          >
             Docs
           </button>
         </div>

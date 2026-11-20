@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
 import SettingsPage from "@/pages/Settings";
+import { useSettingsStore } from "@/stores/settingsStore";
 import { mockInvoke } from "../setup";
 
 function renderSettings() {
@@ -141,5 +142,15 @@ describe("SettingsPage", () => {
       renderSettings();
       expect(screen.getByText(/competitive analysis of 13 products/i)).toBeInTheDocument();
     });
+  });
+
+  it("renders Experimental Features toggle defaulting to false and persists changes", async () => {
+    useSettingsStore.setState({ experimentalFeatures: false });
+    renderSettings();
+    const toggle = screen.getByRole("checkbox", { name: /Experimental Features/i });
+    expect(toggle).not.toBeChecked();
+    await userEvent.click(toggle);
+    expect(toggle).toBeChecked();
+    expect(useSettingsStore.getState().experimentalFeatures).toBe(true);
   });
 });

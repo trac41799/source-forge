@@ -29,8 +29,9 @@ describe("agentStore", () => {
     expect(agents.size).toBe(0);
   });
 
-  it("spawnAgent adds agent and calls invoke", async () => {
-    mockInvoke.mockResolvedValueOnce(undefined);
+  it("spawns_with_valid_ipc_payload", async () => {
+    mockInvoke.mockResolvedValueOnce({ installed: true, command: "opencode" });
+    mockInvoke.mockResolvedValueOnce("session-123");
     await useAgentStore.getState().spawnAgent(sampleConfig, "/test/proj");
     const { agents } = useAgentStore.getState();
     expect(agents.size).toBe(1);
@@ -41,10 +42,10 @@ describe("agentStore", () => {
     expect(session!.projectPath).toBe("/test/proj");
     expect(mockInvoke).toHaveBeenCalledWith("spawn_agent", {
       agentId: "test-agent",
-      sessionId: expect.stringMatching(/^00000000-0000-0000-0000-/),
       projectPath: "/test/proj",
-      spawnCmd: "opencode",
+      command: "opencode",
       args: ["--prompt", "{prompt}"],
+      envVars: {},
     });
   });
 
