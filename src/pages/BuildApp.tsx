@@ -76,6 +76,7 @@ function checkLabel(status: unknown): string {
 
 export default function BuildApp() {
   const project = useProjectStore((s) => s.currentProject);
+  const recentPaths = useProjectStore((s) => s.recentPaths);
   const [specPath, setSpecPath] = useState("");
   const [projectPath, setProjectPath] = useState("");
   const [stackId, setStackId] = useState("nextjs-supabase-vercel");
@@ -222,6 +223,7 @@ export default function BuildApp() {
               id="build-project-path"
               value={projectPath}
               onChange={setProjectPath}
+              recentPaths={recentPaths}
               placeholder="/path/to/project"
               title="Select Project Folder"
               browseLabel="Browse Folder..."

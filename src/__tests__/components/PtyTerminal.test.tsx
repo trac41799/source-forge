@@ -110,4 +110,21 @@ describe("PtyTerminal", () => {
       text: "help\r",
     });
   });
+
+  it("handles xterm FitAddon throwing dimensions error without crashing", async () => {
+    mockFit.mockImplementationOnce(() => {
+      throw new TypeError("Cannot read properties of undefined (reading 'dimensions')");
+    });
+
+    const { container } = render(<PtyTerminal agentId="pi" />);
+    const el = container.firstElementChild as HTMLElement;
+    Object.defineProperty(el, "clientWidth", { value: 600, configurable: true });
+    Object.defineProperty(el, "clientHeight", { value: 300, configurable: true });
+
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 30));
+    });
+    // Should survive without throwing an uncaught error
+    expect(mockOpen).toHaveBeenCalled();
+  });
 });

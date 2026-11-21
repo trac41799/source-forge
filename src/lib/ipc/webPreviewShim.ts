@@ -368,6 +368,54 @@ export function installWebPreviewShim(): void {
           },
         };
 
+      case "parse_handoff_file_cmd":
+        return {
+          original_task: "Implement universal ACP JSON-RPC 2.0 adapter",
+          completed_by: "pi",
+          model_used: "anthropic/claude-sonnet-4",
+          output_summary: "Implemented ACP handshake, permission jail, and handoff synthesis.",
+          changed_files: ["src-tauri/src/agent_adapters/acp.rs"],
+          handoff_instruction: "Run wave integration tests and merge to main.",
+          raw_path: String(args.path ?? "HANDOFF_1-1.md"),
+        };
+
+      case "validate_handoff_schema_cmd": {
+        const text = String(args.content ?? "");
+        const required = [
+          "Completed Work",
+          "Test Results",
+          "Interface Contracts Exposed",
+          "Files NOT Modified",
+          "Design Decisions",
+          "Handoff Instructions",
+        ];
+        const missing = required.filter((s) => !text.includes(s));
+        return [missing.length === 0, missing];
+      }
+
+      case "build_handoff_cmd": {
+        const b = (args.agentBrief as Record<string, unknown>) ?? {};
+        return `# HANDOFF\n\n## Completed Work\n${String(b.output_summary ?? "")}\n\n## Test Results\n- All unit tests passing\n\n## Interface Contracts Exposed\n- Completed by: ${String(b.completed_by ?? "pi")}\n\n## Files NOT Modified\n- None\n\n## Design Decisions\n- Standard ACP JSON-RPC 2.0 contract\n\n## Handoff Instructions\n${String(b.handoff_instruction ?? "")}`;
+      }
+
+      case "route_task_cmd":
+        return [
+          {
+            agent_id: "pi",
+            model_id: "anthropic/claude-sonnet-4",
+            confidence: 0.91,
+            reasoning: "Best historical pass rate for multi-file TypeScript & Rust implementation via ACP.",
+            success_rate: 0.94,
+          },
+          {
+            agent_id: "claude",
+            model_id: "claude-sonnet-4",
+            confidence: 0.87,
+            reasoning: "Strong architectural reasoning and test-first compliance.",
+            success_rate: 0.9,
+          },
+        ];
+
       case "get_corrections_cmd":
       case "get_open_signals_cmd":
       case "get_memory_candidates_cmd":

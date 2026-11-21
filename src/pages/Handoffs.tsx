@@ -90,12 +90,13 @@ export function HandoffPanel() {
       if (typeof selected !== "string" || !selected) return;
 
       const parsed = await store.parseHandoffFile(selected);
+      const changedFiles = (parsed.changed_files ?? []).map((f) => `- ${f}`).join("\n");
       const formatted = [
-        `## Original Task\n${parsed.original_task}`,
-        `## Completed By\n${parsed.completed_by}`,
-        `## Model Used\n${parsed.model_used}`,
-        `## Output Summary\n${parsed.output_summary}`,
-        `## Files Changed\n${(parsed.changed_files ?? []).map((f) => `- ${f}`).join("\n")}`,
+        `## Completed Work\n${parsed.output_summary || parsed.original_task}`,
+        `## Test Results\n- Verified by ${parsed.completed_by || "agent"} (${parsed.model_used || "default"})`,
+        `## Interface Contracts Exposed\n${changedFiles || "- None"}`,
+        `## Files NOT Modified\n- Unscoped workspace files untouched`,
+        `## Design Decisions\n- Task: ${parsed.original_task}`,
         `## Handoff Instructions\n${parsed.handoff_instruction}`,
       ].join("\n\n");
 

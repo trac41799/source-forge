@@ -91,5 +91,7 @@ describe("Handoffs Page", () => {
       /Paste handoff content here to validate schema/i
     ) as HTMLTextAreaElement;
     expect(validatorInput.value).toContain("Implemented auth service");
+    expect(validatorInput.value).toContain("## Completed Work");
+    expect(validatorInput.value).toContain("## Handoff Instructions");
   });
 });
