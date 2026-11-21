@@ -3,8 +3,8 @@ import { useSettingsStore } from "@/stores/settingsStore";
 import { useTheme } from "@/components/ThemeProvider";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
 import { Separator } from "@/components/ui/separator";
+import { FolderPickerInput } from "@/components/ui/path-picker";
 import {
   Globe,
   Zap,
@@ -216,13 +216,18 @@ export default function SettingsPage() {
 
           <div className="space-y-3">
             <div>
-              <label className="text-sm font-medium">Default Project Path</label>
-              <Input
+              <label htmlFor="project-path" className="text-sm font-medium">
+                Default Project Path
+              </label>
+              <FolderPickerInput
+                id="project-path"
                 className="mt-1"
                 placeholder="/path/to/project"
+                title="Select Default Project Folder"
+                browseLabel="Browse Folder"
                 value={localDefaults.projectPath}
-                onChange={(e) =>
-                  setLocalDefaults((d) => ({ ...d, projectPath: e.target.value }))
+                onChange={(projectPath) =>
+                  setLocalDefaults((d) => ({ ...d, projectPath }))
                 }
               />
             </div>
@@ -357,6 +362,30 @@ export default function SettingsPage() {
               CLI tools: Node.js, npm, Vercel CLI required. Supabase MCP auto-detected.
             </span>
           </div>
+        </Card>
+
+        {/* Experimental Features */}
+        <Card className="p-6 space-y-4">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-5" />
+            <h2 className="text-lg font-semibold">Experimental Features</h2>
+          </div>
+          <Separator />
+          <label className="flex items-center justify-between gap-4 cursor-pointer">
+            <div>
+              <p className="text-sm font-medium">Enable Experimental Features</p>
+              <p className="text-xs text-muted-foreground">
+                Reveal speculative Clifford-Bagua hexagram explorer and Leiden community detection panels.
+              </p>
+            </div>
+            <input
+              type="checkbox"
+              aria-label="Experimental Features"
+              checked={store.experimentalFeatures}
+              onChange={(e) => store.saveSettings({ experimentalFeatures: e.target.checked })}
+              className="size-4 accent-indigo-500 rounded"
+            />
+          </label>
         </Card>
 
         {/* Onboarding */}

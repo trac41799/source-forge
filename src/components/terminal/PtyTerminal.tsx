@@ -1,8 +1,20 @@
 import { useEffect, useRef, useImperativeHandle, forwardRef } from 'react'
 import { Terminal } from 'xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import 'xterm/css/xterm.css'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
+import { IPC } from '../../lib/ipc/commands'
+import { useAgentStore } from '../../stores/agentStore'
 import { createPipeline } from '../../lib/pty/pipeline'
 import type { AgentStatus } from '../../lib/types'
+
+interface AgentOutputEventPayload {
+  agent_id: string
+  session_id: string
+  line: string
+  timestamp: string
+}
 
 interface PtyTerminalProps {
   agentId: string
@@ -26,6 +38,9 @@ const PtyTerminal = forwardRef<PtyTerminalHandle, PtyTerminalProps>(
 
     useEffect(() => {
       if (!containerRef.current) return
+
+      let disposed = false
+      let opened = false
 
       const terminal = new Terminal({
         theme: {
@@ -63,8 +78,24 @@ const PtyTerminal = forwardRef<PtyTerminalHandle, PtyTerminalProps>(
       const fitAddon = new FitAddon()
       terminal.loadAddon(fitAddon)
 
-      terminal.open(containerRef.current)
-      fitAddon.fit()
+      const safeFit = () => {
+        if (disposed || !opened || !containerRef.current) return
+        if (containerRef.current.clientWidth === 0 || containerRef.current.clientHeight === 0) {
+          return
+        }
+        try {
+          fitAddon.fit()
+        } catch {
+          // xterm render service may not yet be initialized or already disposed
+        }
+      }
+
+      const openRafId = requestAnimationFrame(() => {
+        if (disposed || !containerRef.current) return
+        terminal.open(containerRef.current)
+        opened = true
+        safeFit()
+      })
 
       terminalRef.current = terminal
       fitAddonRef.current = fitAddon
@@ -79,17 +110,54 @@ const PtyTerminal = forwardRef<PtyTerminalHandle, PtyTerminalProps>(
       }
 
       const handleResize = () => {
-        fitAddon.fit()
+        if (disposed || !opened) return
+        safeFit()
+        if (terminal.cols > 0 && terminal.rows > 0) {
+          invoke(IPC.resizePty, {
+            agentId,
+            cols: terminal.cols,
+            rows: terminal.rows,
+          }).catch(() => {})
+        }
       }
+
+      const dataDisposable = terminal.onData((data) => {
+        useAgentStore.getState().writeToAgent(agentId, data).catch(() => {})
+      })
+
+      let unlistenOutput: UnlistenFn | null = null
+      listen<AgentOutputEventPayload>('agent-output', (event) => {
+        if (disposed || event.payload.agent_id !== agentId) return
+        terminalRef.current?.writeln(event.payload.line)
+        pipelineRef.current?.feed(event.payload.line + '\n')
+      })
+        .then((fn) => {
+          if (disposed) {
+            fn()
+          } else {
+            unlistenOutput = fn
+          }
+        })
+        .catch(() => {})
 
       const observer = new ResizeObserver(handleResize)
       observer.observe(containerRef.current)
       resizeObserverRef.current = observer
 
       return () => {
+        disposed = true
+        cancelAnimationFrame(openRafId)
+        if (unlistenOutput) {
+          unlistenOutput()
+        }
+        dataDisposable.dispose()
         observer.disconnect()
         pipelineRef.current?.destroy()
-        terminal.dispose()
+        terminalRef.current = null
+        fitAddonRef.current = null
+        if (opened) {
+          terminal.dispose()
+        }
       }
     }, [agentId])
 

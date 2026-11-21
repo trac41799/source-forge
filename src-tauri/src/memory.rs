@@ -175,26 +175,52 @@ pub fn get_memory_fact(db: &Connection, id: &str) -> Result<MemoryFact, String> 
     .map_err(|e| e.to_string())
 }
 
+fn escape_like_pattern(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '%' => out.push_str("\\%"),
+            '_' => out.push_str("\\_"),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
 pub fn get_memory_facts(db: &Connection, query: &MemoryQuery) -> Result<Vec<MemoryFact>, String> {
     let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(ref agent_id) = query.agent_id {
-        conditions.push(format!("agent_id = '{}'", agent_id));
+        let idx = params.len() + 1;
+        conditions.push(format!("agent_id = ?{}", idx));
+        params.push(Box::new(agent_id.clone()));
     }
     if let Some(ref session_id) = query.session_id {
-        conditions.push(format!("session_id = '{}'", session_id));
+        let idx = params.len() + 1;
+        conditions.push(format!("session_id = ?{}", idx));
+        params.push(Box::new(session_id.clone()));
     }
     if let Some(ref org_id) = query.org_id {
-        conditions.push(format!("org_id = '{}'", org_id));
+        let idx = params.len() + 1;
+        conditions.push(format!("org_id = ?{}", idx));
+        params.push(Box::new(org_id.clone()));
     }
     if let Some(ref fact_type) = query.fact_type {
-        conditions.push(format!("fact_type = '{}'", fact_type));
+        let idx = params.len() + 1;
+        conditions.push(format!("fact_type = ?{}", idx));
+        params.push(Box::new(fact_type.clone()));
     }
     if let Some(min_conf) = query.min_confidence {
-        conditions.push(format!("confidence >= {}", min_conf));
+        let idx = params.len() + 1;
+        conditions.push(format!("confidence >= ?{}", idx));
+        params.push(Box::new(min_conf));
     }
     if let Some(ref q) = query.q {
-        conditions.push(format!("content LIKE '%{}%'", q));
+        let idx = params.len() + 1;
+        conditions.push(format!("content LIKE ?{} ESCAPE '\\'", idx));
+        params.push(Box::new(format!("%{}%", escape_like_pattern(q))));
     }
 
     let where_clause = if conditions.is_empty() {
@@ -205,15 +231,22 @@ pub fn get_memory_facts(db: &Connection, query: &MemoryQuery) -> Result<Vec<Memo
 
     let limit = query.limit.unwrap_or(100);
     let offset = query.offset.unwrap_or(0);
+    let limit_idx = params.len() + 1;
+    params.push(Box::new(limit));
+    let offset_idx = params.len() + 1;
+    params.push(Box::new(offset));
 
     let sql = format!(
-        "SELECT id, agent_id, session_id, user_id, org_id, fact_type, content, embedding, metadata, confidence, access_count, last_accessed, created_at FROM memory_facts {} ORDER BY created_at DESC LIMIT {} OFFSET {}",
-        where_clause, limit, offset
+        "SELECT id, agent_id, session_id, user_id, org_id, fact_type, content, embedding, metadata, confidence, access_count, last_accessed, created_at FROM memory_facts {} ORDER BY created_at DESC LIMIT ?{} OFFSET ?{}",
+        where_clause, limit_idx, offset_idx
     );
 
     let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
     let facts = stmt
-        .query_map([], row_to_memory_fact)
+        .query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            row_to_memory_fact,
+        )
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -229,24 +262,37 @@ pub fn update_memory_fact(
     metadata: Option<&str>,
 ) -> Result<MemoryFact, String> {
     let mut sets: Vec<String> = Vec::new();
+    let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
 
     if let Some(c) = content {
-        sets.push(format!("content = '{}'", c));
+        let idx = params.len() + 1;
+        sets.push(format!("content = ?{}", idx));
+        params.push(Box::new(c.to_string()));
     }
     if let Some(c) = confidence {
-        sets.push(format!("confidence = {}", c));
+        let idx = params.len() + 1;
+        sets.push(format!("confidence = ?{}", idx));
+        params.push(Box::new(c));
     }
     if let Some(m) = metadata {
-        sets.push(format!("metadata = '{}'", m));
+        let idx = params.len() + 1;
+        sets.push(format!("metadata = ?{}", idx));
+        params.push(Box::new(m.to_string()));
     }
 
     if !sets.is_empty() {
+        let id_idx = params.len() + 1;
+        params.push(Box::new(id.to_string()));
         let sql = format!(
-            "UPDATE memory_facts SET {} WHERE id = '{}'",
+            "UPDATE memory_facts SET {} WHERE id = ?{}",
             sets.join(", "),
-            id
+            id_idx
         );
-        db.execute(&sql, []).map_err(|e| e.to_string())?;
+        db.execute(
+            &sql,
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     get_memory_fact(db, id)
@@ -416,30 +462,152 @@ pub fn get_decayed_factor(last_accessed: &Option<String>) -> f64 {
     }
 }
 
+fn sanitize_fts5_query(q: &str) -> Option<String> {
+    let tokens: Vec<String> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| format!("\"{}\"", w))
+        .collect();
+    if tokens.is_empty() {
+        None
+    } else {
+        Some(tokens.join(" OR "))
+    }
+}
+
+fn append_memory_query_filters(
+    query: &MemoryQuery,
+    alias: &str,
+    conditions: &mut Vec<String>,
+    params: &mut Vec<Box<dyn rusqlite::types::ToSql>>,
+) {
+    let prefix = if alias.is_empty() {
+        String::new()
+    } else {
+        format!("{}.", alias)
+    };
+    if let Some(ref agent_id) = query.agent_id {
+        let idx = params.len() + 1;
+        conditions.push(format!("{}agent_id = ?{}", prefix, idx));
+        params.push(Box::new(agent_id.clone()));
+    }
+    if let Some(ref session_id) = query.session_id {
+        let idx = params.len() + 1;
+        conditions.push(format!("{}session_id = ?{}", prefix, idx));
+        params.push(Box::new(session_id.clone()));
+    }
+    if let Some(ref org_id) = query.org_id {
+        let idx = params.len() + 1;
+        conditions.push(format!("{}org_id = ?{}", prefix, idx));
+        params.push(Box::new(org_id.clone()));
+    }
+    if let Some(ref fact_type) = query.fact_type {
+        let idx = params.len() + 1;
+        conditions.push(format!("{}fact_type = ?{}", prefix, idx));
+        params.push(Box::new(fact_type.clone()));
+    }
+    if let Some(min_conf) = query.min_confidence {
+        let idx = params.len() + 1;
+        conditions.push(format!("{}confidence >= ?{}", prefix, idx));
+        params.push(Box::new(min_conf));
+    }
+}
+
 pub fn hybrid_search(
     db: &Connection,
     query: &MemoryQuery,
     q: &str,
     limit: i64,
 ) -> Result<Vec<SearchResult>, String> {
-    let keywords: Vec<&str> = q.split_whitespace().collect();
-    let base_agent = query.agent_id.as_deref();
-    let base_org = query.org_id.as_deref();
+    if limit <= 0 {
+        return Ok(Vec::new());
+    }
 
-    let base_sql = "SELECT id, agent_id, session_id, user_id, org_id, fact_type, content, embedding, metadata, confidence, access_count, last_accessed, created_at FROM memory_facts WHERE 1=1".to_string();
+    let has_fts: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='memory_facts_fts')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    let lower_tokens: Vec<String> = q
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(|w| w.to_lowercase())
+        .collect();
+
+    if has_fts {
+        if let Some(fts_query) = sanitize_fts5_query(q) {
+            let mut conditions: Vec<String> = vec!["memory_facts_fts MATCH ?1".to_string()];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(fts_query)];
+            append_memory_query_filters(query, "f", &mut conditions, &mut params);
+
+            let candidate_limit = limit.saturating_mul(3).max(20);
+            let limit_idx = params.len() + 1;
+            params.push(Box::new(candidate_limit));
+
+            let sql = format!(
+                "SELECT f.id, f.agent_id, f.session_id, f.user_id, f.org_id, f.fact_type, \
+                 f.content, f.embedding, f.metadata, f.confidence, f.access_count, \
+                 f.last_accessed, f.created_at, (-bm25(memory_facts_fts)) AS bm25_score \
+                 FROM memory_facts_fts \
+                 JOIN memory_facts f ON f.id = memory_facts_fts.id \
+                 WHERE {} \
+                 ORDER BY bm25_score DESC \
+                 LIMIT ?{}",
+                conditions.join(" AND "),
+                limit_idx
+            );
+
+            let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
+            let rows = stmt
+                .query_map(
+                    rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+                    |row| {
+                        let fact = row_to_memory_fact(row)?;
+                        let bm25_score: f64 = row.get(13)?;
+                        Ok((fact, bm25_score))
+                    },
+                )
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+
+            let mut results: Vec<SearchResult> = rows
+                .into_iter()
+                .map(|(fact, bm25_score)| {
+                    let decay = get_decayed_factor(&fact.last_accessed);
+                    let final_score = (bm25_score.max(0.0) * decay * fact.confidence).clamp(0.0, 10.0);
+                    let entity_match = fact.metadata.as_ref().is_some_and(|meta_str| {
+                        let meta_lower = meta_str.to_lowercase();
+                        lower_tokens.iter().any(|kw| meta_lower.contains(kw))
+                    });
+                    let match_type = if entity_match { "entity" } else { "fts5_bm25" };
+                    SearchResult {
+                        fact,
+                        score: final_score,
+                        match_type: match_type.to_string(),
+                    }
+                })
+                .collect();
+
+            results.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            results.truncate(limit as usize);
+            return Ok(results);
+        }
+    }
+
+    // Fallback: parameterized keyword scan (when FTS5 table is absent or query has no alphanumeric tokens)
+    let keywords: Vec<&str> = q.split_whitespace().collect();
+    if keywords.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let base_sql = "SELECT id, agent_id, session_id, user_id, org_id, fact_type, content, embedding, metadata, confidence, access_count, last_accessed, created_at FROM memory_facts WHERE 1=1";
     let mut conditions: Vec<String> = Vec::new();
     let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-
-    if let Some(agent_id) = base_agent {
-        let idx = params.len() + 1;
-        conditions.push(format!("agent_id = ?{}", idx));
-        params.push(Box::new(agent_id.to_string()));
-    }
-    if let Some(org_id) = base_org {
-        let idx = params.len() + 1;
-        conditions.push(format!("org_id = ?{}", idx));
-        params.push(Box::new(org_id.to_string()));
-    }
+    append_memory_query_filters(query, "", &mut conditions, &mut params);
 
     let where_ext = if conditions.is_empty() {
         String::new()
@@ -447,13 +615,20 @@ pub fn hybrid_search(
         format!(" AND {}", conditions.join(" AND "))
     };
 
-    let sql = format!("{} {} ORDER BY created_at DESC LIMIT ?{}", base_sql, where_ext, params.len() + 1);
-    params.push(Box::new(limit * 3));
+    let sql = format!(
+        "{}{} ORDER BY created_at DESC LIMIT ?{}",
+        base_sql,
+        where_ext,
+        params.len() + 1
+    );
+    params.push(Box::new(limit.saturating_mul(3)));
 
     let mut stmt = db.prepare(&sql).map_err(|e| e.to_string())?;
-    let param_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
     let facts = stmt
-        .query_map(param_refs.as_slice(), row_to_memory_fact)
+        .query_map(
+            rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())),
+            row_to_memory_fact,
+        )
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -479,7 +654,7 @@ pub fn hybrid_search(
         }
 
         if matches > 0 {
-            bm25_score = bm25_score / keywords.len().max(1) as f64;
+            bm25_score /= keywords.len().max(1) as f64;
         }
 
         let entity_match = if let Some(ref meta_str) = fact.metadata {
@@ -1113,4 +1288,247 @@ pub async fn compress_context(
         summary,
         phases_applied: phases,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn setup_memory_db(with_fts5: bool) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        // 011_memory.sql ends with a vec0 virtual table that requires sqlite-vec;
+        // execute_batch creates memory_facts + session_checkpoints + indexes before stopping.
+        let _ = conn.execute_batch(include_str!("../migrations/011_memory.sql"));
+        if with_fts5 {
+            conn.execute_batch(include_str!("../migrations/023_memory_fts5.sql"))
+                .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn test_sql_injection_and_single_quotes_safe() {
+        let db = setup_memory_db(false);
+
+        let quote_content = "I'll use Rust's rusqlite::params! so don't interpolate";
+        let sqli_payload = "'; DROP TABLE memory_facts; --";
+
+        let f1 = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "agent'1".to_string(),
+                session_id: "sess'1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "org'1".to_string(),
+                fact_type: "decision".to_string(),
+                content: quote_content.to_string(),
+                metadata: Some("{\"note\":\"it's safe\"}".to_string()),
+                confidence: Some(0.9),
+            },
+        )
+        .unwrap();
+
+        let f2 = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "agent'1".to_string(),
+                session_id: "sess'1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "org'1".to_string(),
+                fact_type: "constraint".to_string(),
+                content: sqli_payload.to_string(),
+                metadata: None,
+                confidence: Some(0.95),
+            },
+        )
+        .unwrap();
+
+        let updated = update_memory_fact(
+            &db,
+            &f1.id,
+            Some("We don't use raw format!('...') in SQL"),
+            Some(0.99),
+            Some("{\"note\":\"updated's value\"}"),
+        )
+        .unwrap();
+        assert_eq!(updated.content, "We don't use raw format!('...') in SQL");
+
+        let by_quote = get_memory_facts(
+            &db,
+            &MemoryQuery {
+                agent_id: Some("agent'1".to_string()),
+                session_id: Some("sess'1".to_string()),
+                org_id: Some("org'1".to_string()),
+                fact_type: None,
+                min_confidence: None,
+                q: Some("don't".to_string()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(by_quote.len(), 1);
+        assert_eq!(by_quote[0].id, f1.id);
+
+        let by_sqli = get_memory_facts(
+            &db,
+            &MemoryQuery {
+                agent_id: None,
+                session_id: None,
+                org_id: None,
+                fact_type: None,
+                min_confidence: None,
+                q: Some(sqli_payload.to_string()),
+                limit: Some(10),
+                offset: Some(0),
+            },
+        )
+        .unwrap();
+        assert_eq!(by_sqli.len(), 1);
+        assert_eq!(by_sqli[0].id, f2.id);
+
+        let count: i64 = db
+            .query_row("SELECT COUNT(*) FROM memory_facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 2, "memory_facts table must remain intact");
+    }
+
+    #[test]
+    fn test_fts5_bm25_hybrid_search() {
+        let db = setup_memory_db(true);
+
+        let f1 = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "proj1".to_string(),
+                fact_type: "pattern".to_string(),
+                content: "authentication token expiry handling".to_string(),
+                metadata: None,
+                confidence: Some(0.9),
+            },
+        )
+        .unwrap();
+
+        let f2 = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "proj1".to_string(),
+                fact_type: "pattern".to_string(),
+                content: "database connection pool sizing".to_string(),
+                metadata: None,
+                confidence: Some(0.9),
+            },
+        )
+        .unwrap();
+
+        let f3 = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "proj1".to_string(),
+                fact_type: "pattern".to_string(),
+                content: "token refresh rotation strategy".to_string(),
+                metadata: None,
+                confidence: Some(0.9),
+            },
+        )
+        .unwrap();
+
+        let q = MemoryQuery {
+            agent_id: None,
+            session_id: None,
+            org_id: Some("proj1".to_string()),
+            fact_type: None,
+            min_confidence: None,
+            q: None,
+            limit: Some(10),
+            offset: Some(0),
+        };
+
+        let results = hybrid_search(&db, &q, "token rotation", 10).unwrap();
+        assert_eq!(results.len(), 2, "only token/rotation facts should match");
+        assert_eq!(results[0].fact.id, f3.id, "multi-term match must rank first");
+        assert_eq!(results[1].fact.id, f1.id);
+        assert_eq!(results[0].match_type, "fts5_bm25");
+        assert!(results[0].score > results[1].score);
+
+        // Verify FTS5 update trigger sync
+        update_memory_fact(
+            &db,
+            &f2.id,
+            Some("key rotation management for postgres"),
+            None,
+            Some("{\"entity\":\"rotation\"}"),
+        )
+        .unwrap();
+        let after_update = hybrid_search(&db, &q, "key management", 10).unwrap();
+        assert_eq!(after_update.len(), 1);
+        assert_eq!(after_update[0].fact.id, f2.id);
+
+        // Verify FTS5 delete trigger sync
+        delete_memory_fact(&db, &f3.id).unwrap();
+        let after_delete = hybrid_search(&db, &q, "refresh", 10).unwrap();
+        assert!(after_delete.is_empty());
+
+        // Special characters / punctuation must not crash FTS5
+        let special = hybrid_search(&db, &q, "don't c++ !!!", 10).unwrap();
+        assert!(special.is_empty());
+
+        // Punctuation-only query falls back gracefully and returns empty
+        let punct = hybrid_search(&db, &q, "!!! --- ***", 10).unwrap();
+        assert!(punct.is_empty());
+    }
+
+    #[test]
+    fn test_fts5_backfill_and_entity_match_and_fallback() {
+        // 1. Create DB without FTS5, insert a fact, then apply 023_memory_fts5.sql
+        let db = setup_memory_db(false);
+        let pre_fact = create_memory_fact(
+            &db,
+            &MemoryFactInput {
+                agent_id: "a1".to_string(),
+                session_id: "s1".to_string(),
+                user_id: "u1".to_string(),
+                org_id: "proj2".to_string(),
+                fact_type: "decision".to_string(),
+                content: "Use WAL mode for concurrent reads".to_string(),
+                metadata: Some("{\"component\":\"sqlite\"}".to_string()),
+                confidence: Some(0.85),
+            },
+        )
+        .unwrap();
+
+        let q = MemoryQuery {
+            agent_id: Some("a1".to_string()),
+            session_id: Some("s1".to_string()),
+            org_id: Some("proj2".to_string()),
+            fact_type: None,
+            min_confidence: None,
+            q: None,
+            limit: Some(10),
+            offset: Some(0),
+        };
+
+        // Fallback keyword scan works when memory_facts_fts is absent
+        let fallback_res = hybrid_search(&db, &q, "concurrent", 10).unwrap();
+        assert_eq!(fallback_res.len(), 1);
+        assert_eq!(fallback_res[0].fact.id, pre_fact.id);
+        assert_eq!(fallback_res[0].match_type, "bm25");
+
+        // Apply 023_memory_fts5.sql and verify backfill + entity match
+        db.execute_batch(include_str!("../migrations/023_memory_fts5.sql"))
+            .unwrap();
+        let fts_entity = hybrid_search(&db, &q, "sqlite", 10).unwrap();
+        assert_eq!(fts_entity.len(), 1);
+        assert_eq!(fts_entity[0].fact.id, pre_fact.id);
+        assert_eq!(fts_entity[0].match_type, "entity");
+    }
 }

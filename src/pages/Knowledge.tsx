@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -32,6 +33,7 @@ import {
   EyeOff,
   ChevronDown,
   ChevronUp,
+  FolderOpen,
 } from "lucide-react";
 import {
   useKnowledgeStore,
@@ -39,6 +41,8 @@ import {
 } from "@/stores/knowledgeStore";
 import { useProjectStore } from "@/stores/projectStore";
 import { useCodebaseStore } from "@/stores/codebaseStore";
+import { useSettingsStore } from "@/stores/settingsStore";
+import { AGENT_CONFIGS } from "@/lib/agents/configs";
 import type { KnowledgeItem, KnowledgeRelation, SubgraphResult } from "@/lib/types";
 import MemoryPanel from "@/components/memory/MemoryPanel";
 
@@ -579,16 +583,25 @@ export default function Knowledge() {
               />
             </div>
             <div className="w-40">
-              <label className="block text-xs text-muted-foreground mb-1">
+              <label htmlFor="knowledge-agent-filter" className="block text-xs text-muted-foreground mb-1">
                 Agent
               </label>
-              <Input
-                placeholder="e.g., opencode"
+              <select
+                id="knowledge-agent-filter"
+                className="w-full h-9 rounded-md border border-input bg-background px-3 text-sm"
                 value={filters.agent || ""}
                 onChange={(e) =>
                   setFilters({ agent: e.target.value || undefined })
                 }
-              />
+              >
+                <option value="">All Agents</option>
+                <option value="pi">Pi</option>
+                {AGENT_CONFIGS.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.label}
+                  </option>
+                ))}
+              </select>
             </div>
             <div className="w-36">
               <label className="block text-xs text-muted-foreground mb-1">
@@ -1078,6 +1091,7 @@ function KgExplorerPanel({
   items: KnowledgeItem[];
 }) {
   const store = useKnowledgeStore();
+  const experimentalFeatures = useSettingsStore((s) => s.experimentalFeatures);
   const containerRef = useRef<HTMLDivElement>(null);
   const cyRef = useRef<{ destroy: () => void } | null>(null);
   const [searchId, setSearchId] = useState("");
@@ -1159,7 +1173,7 @@ function KgExplorerPanel({
         const hex = edge.data("hexagramTag");
         const cycle = edge.data("wuxingCycle");
         const confidence = edge.data("baguaConfidence");
-        if (tag) {
+        if (experimentalFeatures && tag) {
           const info = getTrigramInfo(tag);
           const parts: string[] = [];
           if (info) parts.push(`${info.symbol} ${info.name} — ${info.meaning}`);
@@ -1199,39 +1213,47 @@ function KgExplorerPanel({
     }
   };
 
+  const handleBrowseFile = async () => {
+    try {
+      const selected = await open({ directory: false, multiple: false });
+      if (typeof selected === "string" && selected) {
+        setSearchId(selected);
+      }
+    } catch {
+      // Ignore dialog cancellation / web-preview errors
+    }
+  };
+
   const toggleTrigram = (tag: string) => {
     const cy = cyRef.current as any;
-    if (!cy) return;
     const newHidden = new Set(hiddenTrigrams);
     if (newHidden.has(tag)) {
       newHidden.delete(tag);
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "element");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "element");
     } else {
       newHidden.add(tag);
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "none");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "none");
     }
     setHiddenTrigrams(newHidden);
   };
 
   const showAllEdges = () => {
     const cy = cyRef.current as any;
-    if (!cy) return;
-    cy.edges().style("display", "element");
+    cy?.edges().style("display", "element");
     setHiddenTrigrams(new Set());
   };
 
   const hideAllTrigramEdges = () => {
     const cy = cyRef.current as any;
-    if (!cy) return;
     const trigrams = Object.keys(BAGUA_COLORS);
     trigrams.forEach((tag) => {
-      cy.edges(`[trigramTag = "${tag}"]`).style("display", "none");
+      cy?.edges(`[trigramTag = "${tag}"]`).style("display", "none");
     });
     setHiddenTrigrams(new Set(trigrams));
   };
 
-  const nodeCount = store.kgSubgraph?.nodes.length ?? 0;
-  const edgeCount = store.kgSubgraph?.edges.length ?? 0;
+  const nodeCount = store.kgSubgraph?.nodes?.length ?? 0;
+  const edgeCount = store.kgSubgraph?.edges?.length ?? 0;
 
   return (
     <div className="flex flex-col gap-4 flex-1 min-h-0">
@@ -1266,6 +1288,17 @@ function KgExplorerPanel({
             <Button size="sm" variant="outline" onClick={handleLoadFromItems}>
               <Layers className="w-3.5 h-3.5 mr-1" /> Load Top 20
             </Button>
+            {experimentalFeatures && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  store.kgRunCommunityDetection();
+                }}
+              >
+                <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
+              </Button>
+            )}
             {nodeCount > 0 && (
               <span className="text-xs text-muted-foreground">
                 {nodeCount} nodes · {edgeCount} edges
@@ -1273,7 +1306,7 @@ function KgExplorerPanel({
             )}
           </div>
 
-          {nodeCount > 0 && (
+          {experimentalFeatures && (
             <div className="flex items-center gap-1.5 flex-wrap">
               <span className="text-[10px] text-muted-foreground mr-1">Trigram filter:</span>
               {Object.entries(BAGUA_COLORS).map(([tag, color]) => {
@@ -1353,7 +1386,7 @@ function KgExplorerPanel({
             </div>
           )}
 
-          {nodeCount > 0 && (
+          {experimentalFeatures && (
             <Card className="p-0 overflow-hidden border-white/10">
               <button
                 onClick={() => setLegendOpen(!legendOpen)}
@@ -1474,6 +1507,14 @@ function KgExplorerPanel({
             <Button
               size="sm"
               variant="outline"
+              type="button"
+              onClick={handleBrowseFile}
+            >
+              <FolderOpen className="w-3.5 h-3.5 mr-1" /> Browse File
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => {
                 if (searchId.trim()) store.kgGetCodeKnowledge(searchId.trim());
               }}
@@ -1527,21 +1568,31 @@ function KgExplorerPanel({
             <Button
               size="sm"
               variant="outline"
+              type="button"
+              onClick={handleBrowseFile}
+            >
+              <FolderOpen className="w-3.5 h-3.5 mr-1" /> Browse File
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
               onClick={() => {
                 if (searchId.trim()) store.kgGetCochangeWarnings(searchId.trim());
               }}
             >
               <GitCompare className="w-3.5 h-3.5 mr-1" /> Check
             </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={() => {
-                store.kgRunCommunityDetection();
-              }}
-            >
-              <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
-            </Button>
+            {experimentalFeatures && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  store.kgRunCommunityDetection();
+                }}
+              >
+                <GitBranch className="w-3.5 h-3.5 mr-1" /> Detect Communities
+              </Button>
+            )}
           </div>
           <ScrollArea className="flex-1">
             <div className="space-y-2 pr-2">
@@ -1579,7 +1630,7 @@ interface CytoscapeElement {
 }
 
 function buildKgElements(subgraph: SubgraphResult | null): CytoscapeElement[] {
-  if (!subgraph) return [];
+  if (!subgraph || !Array.isArray(subgraph.nodes) || !Array.isArray(subgraph.edges)) return [];
   const typeColors: Record<string, string> = {
     decision: "#60a5fa",
     pattern: "#34d399",
@@ -1909,6 +1960,23 @@ function CompounderDialog({
             onChange={(e) => setSessionId(e.target.value)}
             placeholder="e.g., 5a4b..."
           />
+          <div className="flex flex-wrap gap-1.5 mt-2">
+            {(["sess-001", "sess-002", "latest"] as const).map((preset) => (
+              <button
+                key={preset}
+                type="button"
+                onClick={() => setSessionId(preset)}
+                className={cn(
+                  "px-2 py-0.5 text-xs font-mono rounded border transition-colors",
+                  sessionId === preset
+                    ? "bg-[#1f6feb]/20 border-[#1f6feb] text-[#58a6ff]"
+                    : "bg-[#161b22] border-[#30363d] text-gray-400 hover:border-gray-500 hover:text-gray-200"
+                )}
+              >
+                {preset}
+              </button>
+            ))}
+          </div>
         </div>
         <div className="flex justify-end gap-2">
           <Button size="sm" variant="ghost" onClick={onClose} disabled={running}>

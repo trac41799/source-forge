@@ -70,6 +70,30 @@ pub fn run() {
             let conn = db::init_db(app).expect("Failed to initialize database");
             let db_path = db::get_db_path(app);
             let app_state = AppState::new(conn, db_path);
+            {
+                let out_handle = app.handle().clone();
+                app_state.pty_manager.set_output_callback(std::sync::Arc::new(
+                    move |agent_id, session_id, line| {
+                        let evt = crate::agent_events::create_output_event(
+                            agent_id,
+                            session_id,
+                            line,
+                        );
+                        crate::agent_events::emit_agent_output(&out_handle, evt);
+                    },
+                ));
+                let status_handle = app.handle().clone();
+                app_state.pty_manager.set_status_callback(std::sync::Arc::new(
+                    move |agent_id, session_id, status| {
+                        let evt = crate::agent_events::create_status_event(
+                            agent_id,
+                            session_id,
+                            status,
+                        );
+                        crate::agent_events::emit_agent_status(&status_handle, evt);
+                    },
+                ));
+            }
             let pty_arc_for_cron = app_state.pty_manager.clone();
             app.manage(app_state);
             events::set_app_handle(app.handle().clone());
@@ -118,6 +142,7 @@ pub fn run() {
             commands::spawn_agent_with_guards,
             commands::kill_agent,
             commands::write_to_agent,
+            commands::resize_pty_cmd,
             commands::list_agents,
             commands::get_agent_output,
             commands::create_worktree_cmd,
@@ -200,6 +225,7 @@ pub fn run() {
             commands::check_agent_version_cmd,
             // Phase 5: Wave Orchestrator
             commands::create_wave_plan_cmd,
+            commands::get_wave_plans_cmd,
             commands::add_plan_agent_cmd,
             commands::get_plan_agents_cmd,
             commands::update_plan_agent_status_cmd,

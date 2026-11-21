@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { invoke } from '@tauri-apps/api/core'
+import { IPC } from '../lib/ipc/commands'
 import type { AgentConfig, AgentStatus, AgentInstallStatus } from '../lib/types'
 import { AgentNotInstalledError } from '../lib/types'
 
@@ -62,12 +63,12 @@ export const useAgentStore = create<AgentStore>((set) => ({
         command: config.spawnCmd,
       })
 
-      await invoke('spawn_agent', {
+      await invoke(IPC.spawnAgent, {
         agentId: config.id,
-        sessionId,
         projectPath,
-        spawnCmd: config.spawnCmd,
+        command: config.spawnCmd,
         args: config.defaultArgs,
+        envVars: {},
       })
     } catch (error) {
       set((state) => {
@@ -80,7 +81,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   },
 
   killAgent: async (agentId: string) => {
-    await invoke('kill_agent', { agentId })
+    await invoke(IPC.killAgent, { agentId })
     set((state) => {
       const newAgents = new Map(state.agents)
       newAgents.delete(agentId)
@@ -89,7 +90,7 @@ export const useAgentStore = create<AgentStore>((set) => ({
   },
 
   writeToAgent: async (agentId: string, text: string) => {
-    await invoke('write_to_agent', { agentId, text })
+    await invoke(IPC.writeToAgent, { agentId, text })
   },
 
   updateStatus: (agentId: string, status: AgentStatus) => {

@@ -9,6 +9,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn().mockResolvedValue(() => undefined),
 }));
 
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: (options: unknown = {}) => mockInvoke("plugin:dialog|open", { options }),
+}));
+
 function renderRunner() {
   mockInvoke.mockResolvedValue([]);
   return render(
@@ -76,14 +80,52 @@ describe("Runner Page", () => {
     expect(screen.getByText("Docs")).toBeInTheDocument();
   });
 
-  it("shows agent dropdown on Add Agent click", async () => {
-    const user = userEvent.setup();
+  it("lists_all_configured_agents_and_wires_actions", async () => {
+    const user = userEvent.setup({ delay: null });
     renderRunner();
+
     await user.click(screen.getByText("+ Add Agent"));
-    expect(screen.getByText("Claude Code")).toBeInTheDocument();
-    expect(screen.getByText("OpenCode")).toBeInTheDocument();
-    expect(screen.getByText("Aider")).toBeInTheDocument();
-  });
+    for (const label of [
+      "Claude Code",
+      "OpenCode",
+      "Aider",
+      "Goose",
+      "Cline CLI",
+      "Cursor",
+      "Gemini CLI",
+      "Qwen Code",
+      "Codex CLI",
+    ]) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
+
+    // Load Profile invokes generate_profile
+    await user.click(screen.getByText("Load Profile"));
+    expect(mockInvoke).toHaveBeenCalledWith("generate_profile", {
+      projectPath: ".",
+    });
+
+    // + New opens inline preset creator and adds preset
+    await user.click(screen.getByText("+ New"));
+    const labelInput = screen.getByPlaceholderText("Preset label");
+    const cmdInput = screen.getByPlaceholderText("Command");
+    await user.type(labelInput, "Build Check");
+    await user.type(cmdInput, "npm run build");
+    await user.click(screen.getByText("Save Preset"));
+    expect(screen.getByText("Build Check")).toBeInTheDocument();
+
+    // Analyze triggers repo map build
+    await user.click(screen.getByText("Analyze"));
+    expect(mockInvoke).toHaveBeenCalledWith(
+      "build_repo_map_cmd",
+      expect.objectContaining({
+        projectPath: ".",
+      })
+    );
+
+    // Docs button triggers navigation or docs view
+    await user.click(screen.getByText("Docs"));
+  }, 15000);
 
   it("shows control sessions section when control mode is active", async () => {
     const user = userEvent.setup();
@@ -96,5 +138,28 @@ describe("Runner Page", () => {
     renderRunner();
     const select = screen.getByRole("combobox");
     expect(select).toBeInTheDocument();
+  });
+
+  it("browses for a project folder and switches project", async () => {
+    const user = userEvent.setup();
+    renderRunner();
+    mockInvoke.mockImplementation(async (cmd: string) => {
+      if (cmd === "plugin:dialog|open") return "D:/projects/picked-app";
+      return [];
+    });
+
+    const browseBtn = screen.getByRole("button", { name: /browse folder/i });
+    await user.click(browseBtn);
+
+    expect(mockInvoke).toHaveBeenCalledWith("plugin:dialog|open", {
+      options: {
+        directory: true,
+        multiple: false,
+        title: "Select Project Folder",
+      },
+    });
+    expect(
+      await screen.findByRole("option", { name: "D:/projects/picked-app" })
+    ).toBeInTheDocument();
   });
 });

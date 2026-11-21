@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, fireEvent } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { ThemeProvider } from "@/components/ThemeProvider";
@@ -88,5 +88,36 @@ describe("Scheduler Page", () => {
     renderScheduler();
     await user.click(screen.getByText("Escalations"));
     expect(screen.getByText(/No active escalations/)).toBeInTheDocument();
+  });
+
+  it("provides quick-pick wave preset badges in job dialog", async () => {
+    const user = userEvent.setup();
+    renderScheduler();
+    await user.click(screen.getByText("New Job"));
+
+    for (const preset of ["default-4-wave", "acp-execution-spine", "nightly-audit"]) {
+      expect(screen.getByRole("button", { name: preset })).toBeInTheDocument();
+    }
+
+    await user.click(screen.getByRole("button", { name: "acp-execution-spine" }));
+    expect(screen.getByPlaceholderText("e.g., default-4-wave")).toHaveValue(
+      "acp-execution-spine"
+    );
+  });
+
+  it("updates escalation_policy JSON when selecting Retry Delay chips or numeric input", async () => {
+    const user = userEvent.setup();
+    renderScheduler();
+    await user.click(screen.getByText("New Job"));
+
+    await user.click(screen.getByRole("button", { name: "15m" }));
+    const escalationTextarea = screen.getByPlaceholderText(
+      '{"max_retries": 3, "retry_delay_minutes": 30}'
+    ) as HTMLTextAreaElement;
+    expect(JSON.parse(escalationTextarea.value).retry_delay_minutes).toBe(15);
+
+    const retryInput = screen.getByLabelText(/Retry Delay \(min\)/i);
+    fireEvent.change(retryInput, { target: { value: "45" } });
+    expect(JSON.parse(escalationTextarea.value).retry_delay_minutes).toBe(45);
   });
 });

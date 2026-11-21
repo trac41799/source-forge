@@ -52,6 +52,9 @@ const CRON_PRESETS: Array<{ label: string; expr: string }> = [
   { label: "Weekly Mon 9am", expr: "0 9 * * 1" },
 ];
 
+const WAVE_PRESETS = ["default-4-wave", "acp-execution-spine", "nightly-audit"] as const;
+const RETRY_DELAY_PRESETS = [15, 30, 60] as const;
+
 function describeCron(expr: string): string {
   const trimmed = expr.trim();
   if (!trimmed) return "No schedule set";
@@ -127,6 +130,46 @@ export default function Scheduler() {
     text: string;
   } | null>(null);
   const [saving, setSaving] = useState(false);
+
+  const retryDelayMinutes = useMemo(() => {
+    try {
+      const parsed = JSON.parse(form.escalation_policy || "{}");
+      if (
+        typeof parsed === "object" &&
+        parsed !== null &&
+        !Array.isArray(parsed) &&
+        typeof parsed.retry_delay_minutes === "number"
+      ) {
+        return parsed.retry_delay_minutes;
+      }
+    } catch {
+      // Ignore invalid JSON while typing
+    }
+    return 30;
+  }, [form.escalation_policy]);
+
+  const updateRetryDelay = useCallback((minutes: number) => {
+    const safeMinutes = Math.max(1, Number.isFinite(minutes) ? minutes : 30);
+    setForm((f) => {
+      let base: Record<string, unknown> = {
+        max_retries: f.max_correction_retries ?? 3,
+        notify_on_escalation: true,
+      };
+      try {
+        const existing = JSON.parse(f.escalation_policy || "{}");
+        if (typeof existing === "object" && existing !== null && !Array.isArray(existing)) {
+          base = { ...existing };
+        }
+      } catch {
+        // Fall back to default object when textarea text is not yet valid JSON
+      }
+      base.retry_delay_minutes = safeMinutes;
+      return {
+        ...f,
+        escalation_policy: JSON.stringify(base, null, 2),
+      };
+    });
+  }, []);
 
   useEffect(() => {
     loadJobs();
@@ -837,10 +880,59 @@ export default function Scheduler() {
                   onChange={(e) => setForm((f) => ({ ...f, wave_preset: e.target.value }))}
                   placeholder="e.g., default-4-wave"
                 />
+                <div className="flex flex-wrap gap-1 mt-2">
+                  {WAVE_PRESETS.map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => setForm((f) => ({ ...f, wave_preset: preset }))}
+                      className={cn(
+                        "inline-flex items-center rounded-md border px-2 py-0.5 text-[10px] font-mono transition-colors",
+                        form.wave_preset === preset
+                          ? "border-[#58a6ff] bg-[#1f6feb]/20 text-[#58a6ff]"
+                          : "border-[#30363d] text-muted-foreground hover:border-[#58a6ff]/50 hover:text-[#58a6ff]"
+                      )}
+                    >
+                      {preset}
+                    </button>
+                  ))}
+                </div>
               </div>
 
               <div>
                 <label className="block text-xs text-muted-foreground mb-1">Escalation Policy (JSON)</label>
+                <div className="flex items-center gap-3 mb-2 flex-wrap">
+                  <div className="flex items-center gap-2">
+                    <label htmlFor="scheduler-retry-delay" className="text-xs text-muted-foreground">
+                      Retry Delay (min)
+                    </label>
+                    <Input
+                      id="scheduler-retry-delay"
+                      type="number"
+                      min={1}
+                      className="w-20 h-8 text-xs"
+                      value={retryDelayMinutes}
+                      onChange={(e) => updateRetryDelay(parseInt(e.target.value, 10) || 1)}
+                    />
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {RETRY_DELAY_PRESETS.map((minutes) => (
+                      <button
+                        key={minutes}
+                        type="button"
+                        onClick={() => updateRetryDelay(minutes)}
+                        className={cn(
+                          "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-mono transition-colors",
+                          retryDelayMinutes === minutes
+                            ? "border-[#58a6ff] bg-[#1f6feb]/20 text-[#58a6ff]"
+                            : "border-[#30363d] text-muted-foreground hover:border-[#58a6ff]/50 hover:text-[#58a6ff]"
+                        )}
+                      >
+                        {minutes}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 <textarea
                   className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm font-mono resize-y"
                   value={form.escalation_policy || ""}

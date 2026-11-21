@@ -11,6 +11,8 @@ beforeEach(() => {
     acbSignals: [],
     memoryCandidates: [],
     playbookManifest: null,
+    lastWaveReport: null,
+    lastVerification: null,
   });
 });
 
@@ -67,6 +69,14 @@ describe("orchestrationStore", () => {
       const result = await useOrchestrationStore.getState().createWavePlan("proj-1", "fix-auth");
       expect(result).toEqual(plan);
       expect(useOrchestrationStore.getState().wavePlans).toEqual([plan]);
+    });
+
+    it("getWavePlans loads persisted wavePlans", async () => {
+      const plans = [{ id: "wp-1", project_id: "proj-1", slug: "fix-auth", docs_path: null, status: "planning", created_at: "2026-06-01T00:00:00Z", completed_at: null }];
+      mockInvoke.mockResolvedValueOnce(plans);
+      await useOrchestrationStore.getState().getWavePlans("proj-1");
+      expect(mockInvoke).toHaveBeenCalledWith("get_wave_plans_cmd", { projectId: "proj-1" });
+      expect(useOrchestrationStore.getState().wavePlans).toEqual(plans);
     });
 
     it("getPlanAgents updates planAgents", async () => {

@@ -32,44 +32,38 @@ interface NavGroup {
 
 const navGroups: NavGroup[] = [
   {
-    id: "work",
-    label: "WORK",
+    id: "workspace",
+    label: "Workspace",
     items: [
       { path: "/build", label: "Build App", icon: Hammer },
       { path: "/orchestrate", label: "Orchestrate", icon: Workflow },
-      { path: "/knowledge", label: "Knowledge", icon: Brain },
-    ],
-  },
-  {
-    id: "review",
-    label: "REVIEW",
-    items: [
-      { path: "/outcomes", label: "Outcomes", icon: BarChart3 },
-      { path: "/replay", label: "Replay", icon: Clock },
-    ],
-  },
-  {
-    id: "configure",
-    label: "CONFIGURE",
-    items: [
       { path: "/route", label: "Route", icon: Map },
-      { path: "/assets", label: "Assets", icon: FolderOpen },
-      { path: "/integrations", label: "Integrations", icon: BookMarked },
-    ],
-  },
-  {
-    id: "automate",
-    label: "AUTOMATE",
-    items: [
       { path: "/scheduler", label: "Scheduler", icon: Clock4 },
       { path: "/playbooks", label: "Playbooks", icon: Boxes },
     ],
   },
   {
-    id: "system",
-    label: "SYSTEM",
+    id: "knowledge",
+    label: "Knowledge & Assets",
     items: [
+      { path: "/knowledge", label: "Knowledge", icon: Brain },
+      { path: "/assets", label: "Assets", icon: FolderOpen },
+      { path: "/integrations", label: "Integrations", icon: BookMarked },
+    ],
+  },
+  {
+    id: "review",
+    label: "Review & Outcomes",
+    items: [
+      { path: "/outcomes", label: "Outcomes", icon: BarChart3 },
+      { path: "/replay", label: "Replay", icon: Clock },
       { path: "/costs", label: "Costs", icon: DollarSign },
+    ],
+  },
+  {
+    id: "settings",
+    label: "Settings",
+    items: [
       { path: "/settings", label: "Settings", icon: Settings },
     ],
   },
@@ -162,7 +156,7 @@ export function Sidebar() {
               const groupActive = group.items.some((i) =>
                 location.pathname.startsWith(i.path)
               );
-              const badgeCount = group.id === "work" ? newItems : 0;
+              const badgeCount = group.id === "knowledge" ? newItems : 0;
 
               const handleToggle = () => {
                 // Accordion: close all other groups when expanding one

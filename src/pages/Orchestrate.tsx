@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useOrchestrationStore, type PlanAgent, type CorrectionDoc } from "@/stores/orchestrationStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -46,11 +47,23 @@ export default function Orchestrate() {
   const location = useLocation();
   const navigate = useNavigate();
   const store = useOrchestrationStore();
+  const currentProject = useProjectStore((s) => s.currentProject);
   const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
   const [newSlug, setNewSlug] = useState("");
-  const [newProjectId, setNewProjectId] = useState("acc-main");
+  const [newProjectId, setNewProjectId] = useState(() => currentProject?.id || "acc-main");
+  const [projectIdTouched, setProjectIdTouched] = useState(false);
   const [newAgent, setNewAgent] = useState({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
   const [hasLoaded, setHasLoaded] = useState(false);
+  const [isExecuting, setIsExecuting] = useState(false);
+  const [isFinalizing, setIsFinalizing] = useState(false);
+  const [selectedHarness, setSelectedHarness] = useState("opencode");
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!projectIdTouched) {
+      setNewProjectId(currentProject?.id || "acc-main");
+    }
+  }, [currentProject?.id, projectIdTouched]);
 
   const activeTab: TabId = location.pathname.includes("/handoffs")
     ? "handoffs"
@@ -68,13 +81,15 @@ export default function Orchestrate() {
   };
 
   useEffect(() => {
-    if (!hasLoaded && store.wavePlans.length === 0) {
+    if (!hasLoaded) {
       setHasLoaded(true);
+      void store.getWavePlans().catch(() => {});
     }
-  }, [store.wavePlans.length, hasLoaded]);
+  }, [hasLoaded, store]);
 
   const handleCreatePlan = async () => {
     if (!newSlug.trim()) return;
+    setActionError(null);
     const plan = await store.createWavePlan(newProjectId, newSlug);
     setSelectedPlanId(plan.id);
     setNewSlug("");
@@ -83,17 +98,50 @@ export default function Orchestrate() {
 
   const handleAddAgent = async () => {
     if (!selectedPlanId || !newAgent.agentRef.trim() || !newAgent.task.trim()) return;
-    await store.addPlanAgent(
-      selectedPlanId,
-      newAgent.agentRef,
-      newAgent.task,
-      parseInt(newAgent.wave) || 1,
-      newAgent.dependsOn || undefined,
-      newAgent.agentId || undefined
-    );
-    setNewAgent({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
-    await store.getPlanAgents(selectedPlanId);
-    await store.getCorrections(selectedPlanId);
+    setActionError(null);
+    try {
+      await store.addPlanAgent(
+        selectedPlanId,
+        newAgent.agentRef,
+        newAgent.task,
+        parseInt(newAgent.wave) || 1,
+        newAgent.dependsOn || undefined,
+        newAgent.agentId || undefined
+      );
+      setNewAgent({ agentRef: "", task: "", wave: "1", dependsOn: "", agentId: "" });
+      await store.getPlanAgents(selectedPlanId);
+      await store.getCorrections(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleExecuteWave = async () => {
+    if (!selectedPlanId) return;
+    setActionError(null);
+    setIsExecuting(true);
+    try {
+      await store.executeWave(selectedPlanId, ".", "main", selectedHarness, []);
+      await store.getPlanAgents(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsExecuting(false);
+    }
+  };
+
+  const handleVerifyAndFinalize = async () => {
+    if (!selectedPlanId || !store.lastWaveReport) return;
+    setActionError(null);
+    setIsFinalizing(true);
+    try {
+      await store.finalizeWave(store.lastWaveReport, ".");
+      await store.getPlanAgents(selectedPlanId);
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsFinalizing(false);
+    }
   };
 
   const handleUpdateStatus = async (agentId: string, status: string) => {
@@ -170,10 +218,15 @@ export default function Orchestrate() {
             />
           </div>
           <div className="w-40">
-            <label className="block text-xs text-gray-400 mb-1">Project ID</label>
+            <label htmlFor="wave-plan-project-id" className="block text-xs text-gray-400 mb-1">Project ID</label>
             <Input
+              id="wave-plan-project-id"
+              aria-label="Project ID"
               value={newProjectId}
-              onChange={(e) => setNewProjectId(e.target.value)}
+              onChange={(e) => {
+                setProjectIdTouched(true);
+                setNewProjectId(e.target.value);
+              }}
               className="bg-[#0d1117] border-[#30363d] text-gray-300"
             />
           </div>
@@ -213,6 +266,107 @@ export default function Orchestrate() {
       {/* Selected Plan Content */}
       {selectedPlanId && (
         <>
+          {/* Execution & Verification Controls */}
+          <Card className="p-4 space-y-3">
+            <div className="flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2">
+                <Waves className="size-4 text-[#58a6ff]" />
+                <span className="text-sm font-medium text-gray-200">Wave Execution</span>
+              </div>
+              <div className="flex items-center gap-2">
+                <select
+                  aria-label="Execution Harness"
+                  value={selectedHarness}
+                  onChange={(e) => setSelectedHarness(e.target.value)}
+                  disabled={isExecuting || isFinalizing}
+                  className="h-8 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-xs text-gray-200"
+                >
+                  <option value="pi">Pi Agent (ACP)</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="opencode-acp">OpenCode (ACP)</option>
+                  <option value="claude">Claude Code (ACP)</option>
+                  <option value="codex">Codex CLI (ACP)</option>
+                  <option value="gemini">Gemini CLI (ACP)</option>
+                  <option value="mock">Mock</option>
+                </select>
+                <Button
+                  size="sm"
+                  onClick={handleExecuteWave}
+                  disabled={isExecuting || isFinalizing}
+                  className="gap-1.5"
+                >
+                  <Play className="size-3.5" />
+                  {isExecuting ? "Executing..." : "Execute Wave Plan"}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={handleVerifyAndFinalize}
+                  disabled={!store.lastWaveReport || isExecuting || isFinalizing}
+                  className="gap-1.5"
+                >
+                  <CheckCircle2 className="size-3.5" />
+                  {isFinalizing ? "Verifying..." : "Verify & Finalize"}
+                </Button>
+              </div>
+            </div>
+
+            {actionError && (
+              <div className="rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-xs text-red-300">
+                {actionError}
+              </div>
+            )}
+
+            {store.lastWaveReport && store.lastWaveReport.plan_id === selectedPlanId && (
+              <div className="space-y-2 border-t border-[#30363d] pt-3 text-xs">
+                <div className="flex items-center justify-between text-gray-400">
+                  <span>Execution Report ({store.lastWaveReport.agents.length} agents)</span>
+                  <span>Cost: ${store.lastWaveReport.total_cost_usd.toFixed(4)}</span>
+                </div>
+                <div className="space-y-1">
+                  {store.lastWaveReport.agents.map((exec) => (
+                    <div
+                      key={`${exec.agent_ref}-${exec.session_id}`}
+                      className="flex items-center justify-between rounded bg-[#0d1117] px-2.5 py-1.5"
+                    >
+                      <span className="font-mono text-gray-200">
+                        {exec.agent_ref} ({exec.branch})
+                      </span>
+                      <Badge variant="outline" className={cn("text-xs", STATUS_COLORS[exec.status] || STATUS_COLORS.queued)}>
+                        {exec.status}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {store.lastVerification && (
+              <div className="space-y-2 border-t border-[#30363d] pt-3 text-xs">
+                <div className="flex items-center gap-2">
+                  {store.lastVerification.passed ? (
+                    <CheckCircle2 className="size-4 text-green-400" />
+                  ) : (
+                    <XCircle className="size-4 text-red-400" />
+                  )}
+                  <span className={store.lastVerification.passed ? "text-green-400 font-medium" : "text-red-400 font-medium"}>
+                    Verification {store.lastVerification.passed ? "Passed" : "Failed"}
+                  </span>
+                </div>
+                <div className="space-y-1">
+                  {store.lastVerification.checks.map((chk) => (
+                    <div key={chk.name} className="flex items-center justify-between rounded bg-[#0d1117] px-2.5 py-1">
+                      <span className="text-gray-300">{chk.name}</span>
+                      <span className="text-gray-400">
+                        {typeof chk.status === "string" ? chk.status : "Fail"}{chk.detail ? ` — ${chk.detail}` : ""}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Card>
+
           {/* Add Agent */}
           <Card className="p-4 space-y-3">
             <div className="flex items-center gap-2">
@@ -230,13 +384,27 @@ export default function Orchestrate() {
                 />
               </div>
               <div>
-                <label className="block text-xs text-gray-400 mb-1">Agent ID (optional)</label>
-                <Input
+                <label htmlFor="plan-agent-id" className="block text-xs text-gray-400 mb-1">Agent ID (optional)</label>
+                <select
+                  id="plan-agent-id"
+                  aria-label="Agent ID"
                   value={newAgent.agentId}
                   onChange={(e) => setNewAgent((p) => ({ ...p, agentId: e.target.value }))}
-                  placeholder="e.g., claude-code"
-                  className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                />
+                  className="w-full h-9 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-sm text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+                >
+                  <option value="">Default (Wave Harness)</option>
+                  <option value="pi">Pi Agent (ACP)</option>
+                  <option value="opencode">OpenCode</option>
+                  <option value="opencode-acp">OpenCode (ACP)</option>
+                  <option value="claude">Claude Code</option>
+                  <option value="codex">Codex CLI</option>
+                  <option value="gemini">Gemini CLI</option>
+                  <option value="aider">Aider</option>
+                  <option value="goose">Goose</option>
+                  <option value="cline">Cline CLI</option>
+                  <option value="cursor">Cursor</option>
+                  <option value="qwen-code">Qwen Code</option>
+                </select>
               </div>
               <div>
                 <label className="block text-xs text-gray-400 mb-1">Task</label>
@@ -249,21 +417,34 @@ export default function Orchestrate() {
               </div>
               <div className="flex gap-2">
                 <div className="flex-1">
-                  <label className="block text-xs text-gray-400 mb-1">Wave #</label>
+                  <label htmlFor="plan-agent-wave" className="block text-xs text-gray-400 mb-1">Wave #</label>
                   <Input
+                    id="plan-agent-wave"
+                    aria-label="Wave #"
+                    type="number"
+                    min={1}
+                    max={20}
                     value={newAgent.wave}
                     onChange={(e) => setNewAgent((p) => ({ ...p, wave: e.target.value }))}
                     className="bg-[#0d1117] border-[#30363d] text-gray-300"
                   />
                 </div>
                 <div className="flex-1">
-                  <label className="block text-xs text-gray-400 mb-1">Depends On</label>
-                  <Input
+                  <label htmlFor="plan-agent-depends-on" className="block text-xs text-gray-400 mb-1">Depends On</label>
+                  <select
+                    id="plan-agent-depends-on"
+                    aria-label="Depends On"
                     value={newAgent.dependsOn}
                     onChange={(e) => setNewAgent((p) => ({ ...p, dependsOn: e.target.value }))}
-                    placeholder="agent ref"
-                    className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                  />
+                    className="w-full h-9 rounded-md border border-[#30363d] bg-[#0d1117] px-2 text-sm text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+                  >
+                    <option value="">None (no dependency)</option>
+                    {store.planAgents.map((a) => (
+                      <option key={a.id} value={a.agent_ref}>
+                        {a.agent_ref} (Wave {a.wave})
+                      </option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </div>

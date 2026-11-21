@@ -1,5 +1,7 @@
 import { useState } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useOrchestrationStore, type HandoffEnvelope } from "@/stores/orchestrationStore";
+import { AGENT_CONFIGS } from "@/lib/agents/configs";
 import { Card } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,7 +14,47 @@ import {
   Send,
   Eye,
   Copy,
+  FolderOpen,
 } from "lucide-react";
+
+const HANDOFF_AGENT_OPTIONS = [
+  { id: "pi", label: "Pi Agent (ACP)" },
+  ...AGENT_CONFIGS.map((a) => ({ id: a.id, label: a.label })),
+];
+
+interface AgentSelectFieldProps {
+  id: string;
+  label: string;
+  placeholder: string;
+  value: string;
+  onChange: (value: string) => void;
+}
+
+function AgentSelectField({ id, label, placeholder, value, onChange }: AgentSelectFieldProps) {
+  const hasKnownOption = !value || HANDOFF_AGENT_OPTIONS.some((a) => a.id === value);
+  return (
+    <div>
+      <label htmlFor={id} className="block text-xs text-gray-400 mb-1">
+        {label}
+      </label>
+      <select
+        id={id}
+        aria-label={label}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full h-9 px-2 text-sm bg-[#0d1117] border border-[#30363d] rounded-md text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+      >
+        <option value="">{placeholder}</option>
+        {HANDOFF_AGENT_OPTIONS.map((agent) => (
+          <option key={agent.id} value={agent.id}>
+            {agent.label}
+          </option>
+        ))}
+        {!hasKnownOption && <option value={value}>{value}</option>}
+      </select>
+    </div>
+  );
+}
 
 interface ValidatedSection {
   name: string;
@@ -35,6 +77,44 @@ export function HandoffPanel() {
   });
   const [validatedSections, setValidatedSections] = useState<ValidatedSection[] | null>(null);
   const [handoffOutput, setHandoffOutput] = useState("");
+  const [loadedFilePath, setLoadedFilePath] = useState<string | null>(null);
+  const [parseError, setParseError] = useState<string | null>(null);
+
+  const handleBrowseHandoff = async () => {
+    setParseError(null);
+    try {
+      const selected = await open({
+        directory: false,
+        filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+      });
+      if (typeof selected !== "string" || !selected) return;
+
+      const parsed = await store.parseHandoffFile(selected);
+      const changedFiles = (parsed.changed_files ?? []).map((f) => `- ${f}`).join("\n");
+      const formatted = [
+        `## Completed Work\n${parsed.output_summary || parsed.original_task}`,
+        `## Test Results\n- Verified by ${parsed.completed_by || "agent"} (${parsed.model_used || "default"})`,
+        `## Interface Contracts Exposed\n${changedFiles || "- None"}`,
+        `## Files NOT Modified\n- Unscoped workspace files untouched`,
+        `## Design Decisions\n- Task: ${parsed.original_task}`,
+        `## Handoff Instructions\n${parsed.handoff_instruction}`,
+      ].join("\n\n");
+
+      setContent(formatted);
+      setEnvelope((prev) => ({
+        ...prev,
+        original_task: parsed.original_task || prev.original_task,
+        completed_by: parsed.completed_by || prev.completed_by,
+        model_used: parsed.model_used || prev.model_used,
+        output_summary: parsed.output_summary || prev.output_summary,
+        changed_files: parsed.changed_files?.length ? parsed.changed_files : prev.changed_files,
+        handoff_instruction: parsed.handoff_instruction || prev.handoff_instruction,
+      }));
+      setLoadedFilePath(parsed.raw_path || selected);
+    } catch (err) {
+      setParseError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleValidate = async () => {
     if (!content.trim()) return;
@@ -80,15 +160,13 @@ export function HandoffPanel() {
                 />
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Completed By</label>
-                  <Input
-                    value={envelope.completed_by}
-                    onChange={(e) => setEnvelope((p) => ({ ...p, completed_by: e.target.value }))}
-                    placeholder="e.g., claude"
-                    className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                  />
-                </div>
+                <AgentSelectField
+                  id="handoff-completed-by"
+                  label="Completed By"
+                  placeholder="Select agent..."
+                  value={envelope.completed_by}
+                  onChange={(value) => setEnvelope((p) => ({ ...p, completed_by: value }))}
+                />
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Model Used</label>
                   <Input
@@ -100,15 +178,13 @@ export function HandoffPanel() {
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="block text-xs text-gray-400 mb-1">Next Agent</label>
-                  <Input
-                    value={envelope.next_agent}
-                    onChange={(e) => setEnvelope((p) => ({ ...p, next_agent: e.target.value }))}
-                    placeholder="e.g., aider"
-                    className="bg-[#0d1117] border-[#30363d] text-gray-300 placeholder:text-gray-600"
-                  />
-                </div>
+                <AgentSelectField
+                  id="handoff-next-agent"
+                  label="Next Agent"
+                  placeholder="Select next agent..."
+                  value={envelope.next_agent}
+                  onChange={(value) => setEnvelope((p) => ({ ...p, next_agent: value }))}
+                />
                 <div>
                   <label className="block text-xs text-gray-400 mb-1">Next Model</label>
                   <Input
@@ -171,10 +247,28 @@ export function HandoffPanel() {
         <div className="flex flex-col gap-4 min-h-0">
           {/* Validation */}
           <Card className="p-4 space-y-3">
-            <div className="flex items-center gap-2">
-              <Eye className="size-4 text-[#d29922]" />
-              <span className="text-sm font-medium text-gray-300">Validate Handoff Schema</span>
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Eye className="size-4 text-[#d29922]" />
+                <span className="text-sm font-medium text-gray-300">Validate Handoff Schema</span>
+              </div>
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={handleBrowseHandoff}
+                className="gap-1.5 text-xs"
+              >
+                <FolderOpen className="size-3.5" />
+                Browse Handoff File...
+              </Button>
             </div>
+            {loadedFilePath && (
+              <p className="text-xs text-green-400 truncate">Loaded: {loadedFilePath}</p>
+            )}
+            {parseError && (
+              <p className="text-xs text-red-400">{parseError}</p>
+            )}
             <textarea
               value={content}
               onChange={(e) => setContent(e.target.value)}

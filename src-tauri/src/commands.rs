@@ -61,12 +61,17 @@ pub async fn spawn_agent(
     project_path: String,
     command: String,
     args: Vec<String>,
-    env_vars: HashMap<String, String>,
+    mut env_vars: HashMap<String, String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
     {
         let mut path = state.current_project_path.lock().map_err(|e| e.to_string())?;
         *path = Some(project_path.clone());
+    }
+    if let Ok(db) = state.db.lock() {
+        for (k, v) in assets::load_vault_env_vars(&db, &agent_id) {
+            env_vars.entry(k).or_insert(v);
+        }
     }
     let session_id = state
         .pty_manager
@@ -82,7 +87,7 @@ pub async fn spawn_agent_with_guards(
     project_path: String,
     command: String,
     args: Vec<String>,
-    env_vars: HashMap<String, String>,
+    mut env_vars: HashMap<String, String>,
     deadline_secs: Option<u64>,
     cost_cap_usd: Option<f64>,
     state: State<'_, AppState>,
@@ -90,6 +95,11 @@ pub async fn spawn_agent_with_guards(
     {
         let mut path = state.current_project_path.lock().map_err(|e| e.to_string())?;
         *path = Some(project_path.clone());
+    }
+    if let Ok(db) = state.db.lock() {
+        for (k, v) in assets::load_vault_env_vars(&db, &agent_id) {
+            env_vars.entry(k).or_insert(v);
+        }
     }
     let session_id = state
         .pty_manager
@@ -181,6 +191,16 @@ pub async fn write_to_agent(
 }
 
 #[tauri::command]
+pub async fn resize_pty_cmd(
+    agent_id: String,
+    cols: u16,
+    rows: u16,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    state.pty_manager.resize_pty(&agent_id, cols, rows).await
+}
+
+#[tauri::command]
 pub async fn list_agents(
     state: State<'_, AppState>,
 ) -> Result<Vec<AgentProcessInfo>, String> {
@@ -192,11 +212,7 @@ pub async fn get_agent_output(
     agent_id: String,
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    let recv = state.pty_manager.get_output_receiver(&agent_id).await?;
-    Ok(match recv {
-        Some(_) => Some(agent_id),
-        None => None,
-    })
+    state.pty_manager.drain_output(&agent_id).await
 }
 
 #[tauri::command]
@@ -655,6 +671,15 @@ pub async fn create_wave_plan_cmd(state: State<'_, AppState>, project_id: String
 }
 
 #[tauri::command]
+pub async fn get_wave_plans_cmd(
+    state: State<'_, AppState>,
+    project_id: Option<String>,
+) -> Result<Vec<orchestrator::WavePlan>, String> {
+    let db = state.db.lock().map_err(|e| e.to_string())?;
+    orchestrator::get_wave_plans(&db, project_id.as_deref())
+}
+
+#[tauri::command]
 pub async fn add_plan_agent_cmd(state: State<'_, AppState>, plan_id: String, agent_ref: String, task: String, wave: i64, depends_on: Option<String>, agent_id: Option<String>) -> Result<orchestrator::PlanAgent, String> {
     let db = state.db.lock().map_err(|e| e.to_string())?;
     orchestrator::add_plan_agent(&db, &plan_id, &agent_ref, &task, wave, depends_on.as_deref(), agent_id.as_deref())
@@ -705,8 +730,16 @@ pub async fn execute_wave_cmd(
         deadline_secs,
         cost_cap_usd,
     };
-    let pty = &state.pty_manager;
-    wave_executor::execute_wave_real(&state.db, pty, config).await
+    let registry = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        crate::agent_adapters::AdapterRegistry::new_with_db(&conn)
+    };
+    if registry.get(&config.agent_command).is_some() {
+        wave_executor::execute_wave_with_adapters(&state.db, config, &registry).await
+    } else {
+        let pty = &state.pty_manager;
+        wave_executor::execute_wave_real(&state.db, pty, config).await
+    }
 }
 
 #[tauri::command]
@@ -727,7 +760,7 @@ pub async fn seed_wave_from_spec_cmd(
     use std::fs;
     let content = fs::read_to_string(&spec_path)
         .map_err(|e| format!("Failed to read spec: {}", e))?;
-    let tasks = spec_parser::parse_gap_closure_plan(&content);
+    let tasks = spec_parser::parse_spec_or_prompt(&content);
 
     if tasks.is_empty() {
         return Err("No tasks parsed from spec".to_string());

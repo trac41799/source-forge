@@ -16,12 +16,19 @@ export const IPC = {
   getPreferences: "get_preferences_cmd",
   setPreferences: "set_preferences_cmd",
 
+  // PTY / Agent Runner
+  spawnAgent: "spawn_agent",
+  killAgent: "kill_agent",
+  writeToAgent: "write_to_agent",
+  resizePty: "resize_pty_cmd",
+
   // Knowledge / compounder
   runCompounder: "run_compounder_cmd",
   getPreflightWarnings: "get_preflight_warnings_cmd",
   getCompounderStatus: "get_compounder_status_cmd",
 
   // Orchestration / verification
+  getWavePlans: "get_wave_plans_cmd",
   executeWave: "execute_wave_cmd",
   finalizeWave: "finalize_wave_cmd",
   verifyAndFinalizeWave: "verify_and_finalize_wave_cmd",

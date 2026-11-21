@@ -1,5 +1,8 @@
 import { useState, useEffect, useCallback } from "react";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useAssetStore, type SkillEntry, type MemoryFileEntry, type MCPEntry, type VaultEntry } from "@/stores/assetStore";
+import { useProjectStore } from "@/stores/projectStore";
+import { AGENT_CONFIGS } from "@/lib/agents/configs";
 import { cn } from "@/lib/utils";
 import {
   FolderOpen,
@@ -37,19 +40,61 @@ const TABS: { id: TabId; label: string; icon: typeof FolderOpen }[] = [
   { id: "plugins", label: "Plugin Manager", icon: Puzzle },
 ];
 
-const VSCodeRulePaths = [
-  "/Applications/E8/Innovations/agent-control-center",
-  "/projects/current",
-];
+const MCP_CONFIG_PRESETS = [
+  "~/.claude.json",
+  ".opencode/config.json",
+  "~/.gemini/settings.json",
+] as const;
+
+const VAULT_KEY_PRESETS = [
+  "OPENROUTER_API_KEY",
+  "ANTHROPIC_API_KEY",
+  "OPENAI_API_KEY",
+  "GEMINI_API_KEY",
+] as const;
 
 export default function Assets() {
+  const activeProjectPath = useProjectStore((s) => s.currentProject?.path) || "";
   const [activeTab, setActiveTab] = useState<TabId>("skills");
   const [search, setSearch] = useState("");
-  const [scanPath, setScanPath] = useState(VSCodeRulePaths[0]);
+  const [scanPath, setScanPath] = useState(activeProjectPath);
   const [mcpPath, setMcpPath] = useState("");
-  const [profilePath, setProfilePath] = useState(VSCodeRulePaths[0]);
+  const [profilePath, setProfilePath] = useState(activeProjectPath);
 
   const store = useAssetStore();
+
+  useEffect(() => {
+    if (activeProjectPath) {
+      setScanPath((prev) => prev || activeProjectPath);
+      setProfilePath((prev) => prev || activeProjectPath);
+    }
+  }, [activeProjectPath]);
+
+  const handleBrowseFolder = async (onSelect: (path: string) => void) => {
+    try {
+      const selected = await open({ directory: true, multiple: false });
+      if (typeof selected === "string" && selected) {
+        onSelect(selected);
+      }
+    } catch {
+      // Ignore dialog cancellation / web-preview errors
+    }
+  };
+
+  const handleBrowseMcpFile = async () => {
+    try {
+      const selected = await open({
+        directory: false,
+        multiple: false,
+        filters: [{ name: "Config", extensions: ["json", "yaml", "yml", "toml"] }],
+      });
+      if (typeof selected === "string" && selected) {
+        setMcpPath(selected);
+      }
+    } catch {
+      // Ignore dialog cancellation / web-preview errors
+    }
+  };
 
   useEffect(() => {
     if (activeTab === "skills") store.scanSkills(scanPath);
@@ -173,6 +218,13 @@ export default function Assets() {
               placeholder="Scan path..."
             />
             <button
+              type="button"
+              onClick={() => handleBrowseFolder(setScanPath)}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-300 rounded transition-colors"
+            >
+              <FolderOpen className="size-3" /> Browse Folder
+            </button>
+            <button
               onClick={() => store.scanSkills(scanPath)}
               className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#1f6feb] hover:bg-[#388bfd] text-white rounded transition-colors"
             >
@@ -190,6 +242,13 @@ export default function Assets() {
               placeholder="Project path..."
             />
             <button
+              type="button"
+              onClick={() => handleBrowseFolder(setScanPath)}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-300 rounded transition-colors"
+            >
+              <FolderOpen className="size-3" /> Browse Folder
+            </button>
+            <button
               onClick={() => store.scanMemory(scanPath)}
               className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#1f6feb] hover:bg-[#388bfd] text-white rounded transition-colors"
             >
@@ -203,9 +262,31 @@ export default function Assets() {
               type="text"
               value={mcpPath}
               onChange={(e) => setMcpPath(e.target.value)}
-              className="px-2 py-1.5 text-sm bg-[#161b22] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb] min-w-[360px]"
+              className="px-2 py-1.5 text-sm bg-[#161b22] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb] min-w-[260px]"
               placeholder="MCP config path (e.g. ~/.claude.json)"
             />
+            <select
+              aria-label="MCP config preset"
+              value={MCP_CONFIG_PRESETS.includes(mcpPath as (typeof MCP_CONFIG_PRESETS)[number]) ? mcpPath : ""}
+              onChange={(e) => {
+                if (e.target.value) setMcpPath(e.target.value);
+              }}
+              className="px-2 py-1.5 text-xs bg-[#161b22] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb]"
+            >
+              <option value="">Presets...</option>
+              {MCP_CONFIG_PRESETS.map((preset) => (
+                <option key={preset} value={preset}>
+                  {preset}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              onClick={handleBrowseMcpFile}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-300 rounded transition-colors"
+            >
+              <FileText className="size-3" /> Browse File
+            </button>
             <button
               onClick={() => store.listMcps(mcpPath)}
               className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#1f6feb] hover:bg-[#388bfd] text-white rounded transition-colors"
@@ -231,6 +312,13 @@ export default function Assets() {
               className="px-2 py-1.5 text-sm bg-[#161b22] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb] min-w-[240px]"
               placeholder="Project path..."
             />
+            <button
+              type="button"
+              onClick={() => handleBrowseFolder(setProfilePath)}
+              className="flex items-center gap-1 px-2.5 py-1.5 text-xs bg-[#21262d] hover:bg-[#30363d] border border-[#30363d] text-gray-300 rounded transition-colors"
+            >
+              <FolderOpen className="size-3" /> Browse Folder
+            </button>
             <button
               onClick={() => store.generateProfile(profilePath)}
               className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#1f6feb] hover:bg-[#388bfd] text-white rounded transition-colors"
@@ -758,6 +846,23 @@ function VaultTab({
               <label className="block text-xs text-gray-400 mb-1">
                 Key Name
               </label>
+              <div className="flex flex-wrap gap-1.5 mb-2">
+                {VAULT_KEY_PRESETS.map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => setNewKey(preset)}
+                    className={cn(
+                      "px-2 py-0.5 text-[11px] font-mono rounded border transition-colors",
+                      newKey === preset
+                        ? "bg-[#1f6feb]/20 border-[#1f6feb] text-[#58a6ff]"
+                        : "bg-[#0d1117] border-[#30363d] text-gray-400 hover:border-gray-500 hover:text-gray-200"
+                    )}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
               <input
                 type="text"
                 value={newKey}
@@ -793,16 +898,23 @@ function VaultTab({
               />
             </div>
             <div>
-              <label className="block text-xs text-gray-400 mb-1">
-                Agent ID (optional)
+              <label htmlFor="vault-agent-scope" className="block text-xs text-gray-400 mb-1">
+                Agent Scope
               </label>
-              <input
-                type="text"
+              <select
+                id="vault-agent-scope"
                 value={newAgentId}
                 onChange={(e) => setNewAgentId(e.target.value)}
-                placeholder="e.g. claude-code"
                 className="w-full px-2 py-1.5 text-sm bg-[#0d1117] border border-[#30363d] rounded text-gray-300 focus:outline-none focus:border-[#1f6feb]"
-              />
+              >
+                <option value="">All Agents (Global)</option>
+                <option value="pi">Pi</option>
+                {AGENT_CONFIGS.map((agent) => (
+                  <option key={agent.id} value={agent.id}>
+                    {agent.label}
+                  </option>
+                ))}
+              </select>
             </div>
           </div>
           <div className="flex justify-end gap-2">
